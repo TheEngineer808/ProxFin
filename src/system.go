@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -107,6 +108,38 @@ func updateUrlsJson() {
 }
 
 // Einstellungen laden und default Werte setzen (Threadfin)
+// The FFmpeg default options. "?" makes the maps optional, so radio (no
+// video) and video-only channels work. -copyts keeps the source's
+// timestamps: when the buffer reconnects to the same live channel, the
+// client's timeline continues instead of restarting at zero.
+const defaultFFmpegOptions = "-hide_banner -loglevel error -analyzeduration 1000000 -probesize 1000000 -i [URL] -map 0:v? -map 0:a:0? -c:v copy -c:a aac -b:a 192k -ac 2 -c:s copy -f mpegts -fflags +genpts -copyts pipe:1"
+
+// The FFmpeg default options before radio channels were supported.
+const previousFFmpegDefaultOptions = "-hide_banner -loglevel error -analyzeduration 1000000 -probesize 1000000 -i [URL] -map 0:v -map 0:a:0 -c:v copy -c:a aac -b:a 192k -ac 2 -c:s copy -f mpegts -fflags +genpts -movflags +faststart -copyts pipe:1"
+
+// jellyfin-ffmpeg is installed by the Docker image: a current FFmpeg with
+// full NVIDIA, Intel and AMD hardware support.
+const jellyfinFFmpegPath = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+
+// defaultFFmpegPath prefers jellyfin-ffmpeg, then ffmpeg from the PATH.
+func defaultFFmpegPath() string {
+	if runtime.GOOS == "linux" {
+		if fi, err := os.Stat(jellyfinFFmpegPath); err == nil && !fi.IsDir() {
+			return jellyfinFFmpegPath
+		}
+	}
+	return searchFileInOS("ffmpeg")
+}
+
+// migrateFFmpegOptions gives installs that never changed the FFmpeg
+// options the new default.
+func migrateFFmpegOptions(settings *SettingsStruct) {
+	if settings.FFmpegOptions == previousFFmpegDefaultOptions {
+		settings.FFmpegOptions = System.FFmpeg.DefaultOptions
+		showInfo("FFmpeg:Default options updated (radio and video-only channels)")
+	}
+}
+
 func loadSettings() (settings SettingsStruct, err error) {
 
 	settingsMap, err := loadJSONFileToMap(System.File.Settings)
@@ -192,8 +225,10 @@ func loadSettings() (settings SettingsStruct, err error) {
 	}
 
 	if len(settings.FFmpegPath) == 0 {
-		settings.FFmpegPath = searchFileInOS("ffmpeg")
+		settings.FFmpegPath = defaultFFmpegPath()
 	}
+
+	migrateFFmpegOptions(&settings)
 
 	if len(settings.VLCPath) == 0 {
 		settings.VLCPath = searchFileInOS("cvlc")
@@ -311,31 +346,20 @@ func setDeviceID() {
 // Provider Streaming-URL zu Threadfin Streaming-URL konvertieren
 func createStreamingURL(streamingType, playlistID, channelNumber, channelName, url string, backup_channel_1 *BackupStream, backup_channel_2 *BackupStream, backup_channel_3 *BackupStream) (streamingURL string, err error) {
 
-	var streamInfo StreamInfo
 	var serverProtocol string
-
-	if len(Data.Cache.StreamingURLS) == 0 {
-		Data.Cache.StreamingURLS = make(map[string]StreamInfo)
-	}
 
 	var urlID = getMD5(fmt.Sprintf("%s-%s", playlistID, url))
 
-	if s, ok := Data.Cache.StreamingURLS[urlID]; ok {
-		streamInfo = s
-
-	} else {
-		streamInfo.URL = url
-		streamInfo.BackupChannel1 = backup_channel_1
-		streamInfo.BackupChannel2 = backup_channel_2
-		streamInfo.BackupChannel3 = backup_channel_3
-		streamInfo.Name = channelName
-		streamInfo.PlaylistID = playlistID
-		streamInfo.ChannelNumber = channelNumber
-		streamInfo.URLid = urlID
-
-		Data.Cache.StreamingURLS[urlID] = streamInfo
-
-	}
+	streamInfo := storeStreamingURL(urlID, StreamInfo{
+		URL:            url,
+		BackupChannel1: backup_channel_1,
+		BackupChannel2: backup_channel_2,
+		BackupChannel3: backup_channel_3,
+		Name:           channelName,
+		PlaylistID:     playlistID,
+		ChannelNumber:  channelNumber,
+		URLid:          urlID,
+	})
 
 	switch streamingType {
 
@@ -360,32 +384,16 @@ func createStreamingURL(streamingType, playlistID, channelNumber, channelName, u
 
 func getStreamInfo(urlID string) (streamInfo StreamInfo, err error) {
 
-	if len(Data.Cache.StreamingURLS) == 0 {
-
-		tmp, err := loadJSONFileToMap(System.File.URLS)
-		if err != nil {
-			return streamInfo, err
-		}
-
-		err = json.Unmarshal([]byte(mapToJSON(tmp)), &Data.Cache.StreamingURLS)
-		if err != nil {
-			return streamInfo, err
-		}
-
+	s, ok, err := lookupStreamingURL(urlID)
+	if err != nil {
+		return streamInfo, err
+	}
+	if !ok {
+		return streamInfo, errors.New("streaming error")
 	}
 
-	if s, ok := Data.Cache.StreamingURLS[urlID]; ok {
-		s.URL = strings.Trim(s.URL, "\r\n")
-		s.BackupChannel1 = s.BackupChannel1
-		s.BackupChannel2 = s.BackupChannel2
-		s.BackupChannel3 = s.BackupChannel3
-
-		streamInfo = s
-	} else {
-		err = errors.New("streaming error")
-	}
-
-	return
+	s.URL = strings.Trim(s.URL, "\r\n")
+	return s, nil
 }
 
 func isRunningInContainer() bool {

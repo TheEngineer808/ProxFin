@@ -58,8 +58,8 @@ func buildXEPG(background bool) {
 	// Enter maintenance during core steps
 
 	// Clear streaming URL cache
-	Data.Cache.StreamingURLS = make(map[string]StreamInfo)
-	saveMapToJSONFile(System.File.URLS, Data.Cache.StreamingURLS)
+	resetStreamingURLs()
+	saveStreamingURLs()
 
 	var err error
 
@@ -341,8 +341,8 @@ func createXEPGDatabase() (err error) {
 	Data.XEPG.Channels = make(map[string]interface{}, System.UnfilteredChannelLimit)
 
 	// Clear streaming URL cache
-	Data.Cache.StreamingURLS = make(map[string]StreamInfo)
-	saveMapToJSONFile(System.File.URLS, Data.Cache.StreamingURLS)
+	resetStreamingURLs()
+	saveStreamingURLs()
 
 	Data.Cache.Streams.Active = make([]string, 0, System.UnfilteredChannelLimit)
 	Data.XEPG.Channels, err = loadJSONFileToMap(System.File.XEPG)
@@ -1738,7 +1738,7 @@ func createM3UFile() {
 		ShowError(err, 000)
 	}
 
-	saveMapToJSONFile(System.File.URLS, Data.Cache.StreamingURLS)
+	saveStreamingURLs()
 
 	return
 }

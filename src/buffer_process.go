@@ -2,6 +2,7 @@ package src
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,12 @@ func bufferCommand(program string, src streambuf.Source) (path string, args []st
 				if proxyIP != "" && proxyPort != "" {
 					args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", proxyIP, proxyPort))
 				}
+				// ffmpeg reconnects HTTP sources itself: faster than a
+				// restart, and the stream's timeline stays continuous.
+				if isHTTPURL(url) && !strings.Contains(options, "-reconnect") {
+					args = append(args, ffmpegReconnectArgs(path)...)
+				}
+
 				var headers string
 				if referer != "" {
 					headers += fmt.Sprintf("Referer: %s\r\n", referer)
@@ -106,6 +113,50 @@ func bufferCommand(program string, src streambuf.Source) (path string, args []st
 	}
 
 	return path, args, nil
+}
+
+func isHTTPURL(url string) bool {
+	u := strings.ToLower(url)
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// Reconnect options for HTTP sources, in order. reconnect_delay_max keeps
+// the retries short (about 1 s in all), after which the buffer itself
+// reconnects or fails over. reconnect_at_eof is left out: it makes ffmpeg
+// re-request HLS playlists endlessly.
+var ffmpegReconnectOptions = [][2]string{
+	{"reconnect", "1"},
+	{"reconnect_streamed", "1"},
+	{"reconnect_on_network_error", "1"},
+	{"reconnect_delay_max", "2"},
+}
+
+var ffmpegReconnectCache sync.Map // ffmpeg path -> []string
+
+// ffmpegReconnectArgs returns the reconnect options this ffmpeg supports
+// (older builds lack some; an unknown option would make every stream fail).
+func ffmpegReconnectArgs(path string) []string {
+	if v, ok := ffmpegReconnectCache.Load(path); ok {
+		return v.([]string)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, path, "-hide_banner", "-h", "protocol=http").Output()
+	help := string(out)
+
+	var args []string
+	for _, o := range ffmpegReconnectOptions {
+		if strings.Contains(help, "-"+o[0]+" ") {
+			args = append(args, "-"+o[0], o[1])
+		}
+	}
+	if !strings.Contains(help, "-reconnect ") {
+		args = nil // not this ffmpeg's http help after all
+	}
+
+	ffmpegReconnectCache.Store(path, args)
+	return args
 }
 
 // bufferProcess is a running ffmpeg/VLC whose output feeds the buffer.

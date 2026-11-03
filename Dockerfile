@@ -56,6 +56,7 @@ ENV THREADFIN_BIN=/home/threadfin/bin \
     THREADFIN_PORT=34400 \
     THREADFIN_LOG=/var/log/threadfin.log \
     THREADFIN_BIND_IP_ADDRESS=0.0.0.0 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/threadfin/bin \
     DEBIAN_FRONTEND=noninteractive
 

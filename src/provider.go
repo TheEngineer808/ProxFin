@@ -1,8 +1,10 @@
 package src
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -319,35 +321,46 @@ func getProviderData(fileType, fileID string) (err error) {
 	return
 }
 
+// Timeouts for playlist and EPG downloads. They detect a server that does
+// not answer or stops sending, without limiting how long a large file on a
+// slow connection may take. (This used to reuse the "Timeout for new client
+// connections" setting, read as seconds instead of milliseconds: 500 s by
+// default.)
+var (
+	downloadConnectTimeout  = 30 * time.Second
+	downloadResponseTimeout = 60 * time.Second
+	downloadIdleTimeout     = 60 * time.Second
+)
+
 func downloadFileFromServer(providerURL string, proxyUrl string) (filename string, body []byte, err error) {
 	_, err = url.ParseRequestURI(providerURL)
 	if err != nil {
 		return
 	}
 
-	// Derive a timeout: prefer configured buffer timeout if provided, else default to 30s
-	requestTimeout := 30 * time.Second
-	if Settings.BufferTimeout > 0 {
-		requestTimeout = time.Duration(Settings.BufferTimeout*1000) * time.Millisecond
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: downloadConnectTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   downloadConnectTimeout,
+		ResponseHeaderTimeout: downloadResponseTimeout,
+		ForceAttemptHTTP2:     true,
 	}
-
-	httpClient := &http.Client{Timeout: requestTimeout}
+	defer transport.CloseIdleConnections()
 
 	if proxyUrl != "" {
 		proxyURL, err := url.Parse(proxyUrl)
 		if err != nil {
 			return "", nil, err
 		}
-
-		httpClient = &http.Client{
-			Timeout: requestTimeout,
-			Transport: &http.Transport{
-				Proxy: http.ProxyURL(proxyURL),
-			},
-		}
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	req, err := http.NewRequest("GET", providerURL, nil)
+	httpClient := &http.Client{Transport: transport}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", providerURL, nil)
 	if err != nil {
 		return
 	}
@@ -382,10 +395,32 @@ func downloadFileFromServer(providerURL string, proxyUrl string) (filename strin
 		filename = cleanFilename[0]
 	}
 
-	body, err = io.ReadAll(resp.Body)
+	// Abort if the server stops sending data.
+	idle := time.AfterFunc(downloadIdleTimeout, cancel)
+	defer idle.Stop()
+
+	body, err = io.ReadAll(&idleReader{r: resp.Body, timer: idle, timeout: downloadIdleTimeout})
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%s: no data received for %v", providerURL, downloadIdleTimeout)
+		}
 		return
 	}
 
 	return
+}
+
+// idleReader restarts timer whenever data arrives.
+type idleReader struct {
+	r       io.Reader
+	timer   *time.Timer
+	timeout time.Duration
+}
+
+func (ir *idleReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.timer.Reset(ir.timeout)
+	}
+	return n, err
 }
