@@ -7,7 +7,6 @@ package src
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -143,7 +144,6 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 	var playlist Playlist
 	var client ThisClient
 	var stream ThisStream
-	var streaming = false
 	var streamID int
 	var debug string
 	var timeOut = 0
@@ -358,6 +358,12 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 		BufferInformation.Store(playlistID, playlist)
 		Lock.Unlock()
 
+		// Register the viewer before the buffer process starts, so the
+		// buffer's "any viewers left?" check never runs before this exists.
+		var clients ClientConnection
+		clients.Connection = 1
+		BufferClients.Store(playlistID+stream.MD5, clients)
+
 		switch playlist.Buffer {
 
 		case "ffmpeg", "vlc":
@@ -370,12 +376,11 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 		showInfo(fmt.Sprintf("Streaming Status 1:Playlist: %s - Tuner: %d / %d", playlist.PlaylistName, len(playlist.Streams), playlist.Tuner))
 
-		var clients ClientConnection
-		clients.Connection = 1
-		BufferClients.Store(playlistID+stream.MD5, clients)
-
 	}
 
+	// Headers must be set before WriteHeader; changes made afterwards are ignored.
+	// video/mpeg matches what a real HDHomeRun tuner sends.
+	w.Header().Set("Content-Type", "video/mpeg")
 	w.WriteHeader(200)
 
 	for { //Loop 1: Wait until the first segment has been downloaded through the buffer
@@ -407,6 +412,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 				}
 
 				var oldSegments []string
+				var lastSent int64 // number of the newest segment sent to this viewer
 
 				for { // Loop 2: Temporary files are present, data can be sent to the client
 
@@ -446,8 +452,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 						return
 					}
 
-					var tmpFiles = getBufTmpFiles(&stream)
-					//fmt.Println("Buffer Loop:", stream.Connection)
+					var tmpFiles = getBufTmpFiles(stream.Folder, &lastSent)
 
 					for _, f := range tmpFiles {
 
@@ -464,75 +469,32 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 						if err != nil {
 							debug = fmt.Sprintf("Buffer Open (%s)", fileName)
 							showDebug(debug, 2)
+							killClientConnection(streamID, playlistID, false)
 							return
 						}
-						defer file.Close()
 
-						if err == nil {
+						debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
+						showDebug(debug, 2)
 
-							l, err := file.Stat()
-							if err == nil {
+						// Stream the segment through a pooled buffer instead of
+						// allocating a segment-sized slice per viewer per segment.
+						_, err = io.Copy(w, file)
+						file.Close()
 
-								debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
-								showDebug(debug, 2)
-
-								var buffer = make([]byte, int(l.Size()))
-								_, err = file.Read(buffer)
-
-								if err == nil {
-
-									file.Seek(0, 0)
-
-									if !streaming {
-
-										contentType := http.DetectContentType(buffer)
-										_ = contentType
-										//w.Header().Set("Content-type", "video/mpeg")
-										w.Header().Set("Content-type", contentType)
-										w.Header().Set("Content-Length", "0")
-										w.Header().Set("Connection", "close")
-
-									}
-
-									/*
-									   // HDHR Header
-									   w.Header().Set("Cache-Control", "no-cache")
-									   w.Header().Set("Pragma", "no-cache")
-									   w.Header().Set("transferMode.dlna.org", "Streaming")
-									*/
-
-									_, err := w.Write(buffer)
-
-									if err != nil {
-										file.Close()
-										killClientConnection(streamID, playlistID, false)
-										return
-									}
-
-									file.Close()
-									streaming = true
-
-								}
-
-								file.Close()
-
-							}
-
-							var n = indexOfString(f, oldSegments)
-
-							if n > 20 {
-
-								var fileToRemove = stream.Folder + oldSegments[0]
-								if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
-									ShowError(err, 4007)
-								}
-								oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
-
-							}
-
+						if err != nil {
+							killClientConnection(streamID, playlistID, false)
+							return
 						}
 
-						file.Close()
+						if len(oldSegments) > 21 {
+
+							var fileToRemove = stream.Folder + oldSegments[0]
+							if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
+								ShowError(err, 4007)
+							}
+							oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
+
+						}
 
 					}
 
@@ -558,10 +520,15 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 }
 
-func getBufTmpFiles(stream *ThisStream) (tmpFiles []string) {
+// getBufTmpFiles returns, in order, the completed segments in tmpFolder that
+// are newer than *lastSent, and advances *lastSent. The newest file is still
+// being written by the buffer process and is never returned.
+//
+// Tracking only the last segment number (instead of every name sent) keeps
+// this O(files in folder) however long the stream runs.
+func getBufTmpFiles(tmpFolder string, lastSent *int64) (tmpFiles []string) {
 
-	var tmpFolder = stream.Folder
-	var fileIDs []float64
+	var fileIDs []int64
 
 	if _, err := bufferVFS.Stat(tmpFolder); !fsIsNotExistErr(err) {
 
@@ -575,8 +542,8 @@ func getBufTmpFiles(stream *ThisStream) (tmpFiles []string) {
 
 			for _, file := range files {
 
-				var fileID = strings.Replace(file.Name(), ".ts", "", -1)
-				var f, err = strconv.ParseFloat(fileID, 64)
+				var fileID = strings.TrimSuffix(file.Name(), ".ts")
+				var f, err = strconv.ParseInt(fileID, 10, 64)
 
 				if err == nil {
 					fileIDs = append(fileIDs, f)
@@ -584,16 +551,18 @@ func getBufTmpFiles(stream *ThisStream) (tmpFiles []string) {
 
 			}
 
-			sort.Float64s(fileIDs)
+			if len(fileIDs) == 0 {
+				return
+			}
+
+			sort.Slice(fileIDs, func(i, j int) bool { return fileIDs[i] < fileIDs[j] })
 			fileIDs = fileIDs[:len(fileIDs)-1]
 
-			for _, file := range fileIDs {
+			for _, id := range fileIDs {
 
-				var fileName = fmt.Sprintf("%d.ts", int64(file))
-
-				if indexOfString(fileName, stream.OldSegments) == -1 {
-					tmpFiles = append(tmpFiles, fileName)
-					stream.OldSegments = append(stream.OldSegments, fileName)
+				if id > *lastSent {
+					tmpFiles = append(tmpFiles, fmt.Sprintf("%d.ts", id))
+					*lastSent = id
 				}
 
 			}
@@ -1018,371 +987,428 @@ func switchBandwidth(stream *ThisStream) (err error) {
 	return
 }
 
+// Timeouts for the ffmpeg/VLC buffer process.
+var (
+	// How long the process may take to fill its first segment.
+	bufferStartTimeout = 20 * time.Second
+	// How long a running stream may go without any data before it is
+	// treated as dead (failover to a backup, or disconnect the viewers).
+	bufferStallTimeout = 15 * time.Second
+)
+
+// Size of each read from the buffer process. Larger reads mean fewer
+// syscalls per second; a Linux pipe holds 64 KB by default.
+const bufferReadSize = 64 * 1024
+
+// nextBackup returns the number (1-3) of the first configured backup channel
+// after backup number `current` (0 = primary), or 0 if none is left.
+func nextBackup(stream ThisStream, current int) int {
+	backups := []*BackupStream{stream.BackupChannel1, stream.BackupChannel2, stream.BackupChannel3}
+	for n := current + 1; n <= len(backups); n++ {
+		if backups[n-1] != nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// lastSegmentNumber returns the highest N among the N.ts files in folder,
+// or 0 if there are none.
+func lastSegmentNumber(folder string) (last int64) {
+	files, err := bufferVFS.ReadDir(getPlatformPath(folder))
+	if err != nil {
+		return 0
+	}
+	for _, file := range files {
+		if n, err := strconv.ParseInt(strings.TrimSuffix(file.Name(), ".ts"), 10, 64); err == nil && n > last {
+			last = n
+		}
+	}
+	return
+}
+
 // Buffer with FFMPEG
 func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNumber int) {
 
-	if p, ok := BufferInformation.Load(playlistID); ok {
+	p, ok := BufferInformation.Load(playlistID)
+	if !ok {
+		return
+	}
 
-		var playlist = p.(Playlist)
-		var debug, path, options, bufferType string
-		var tmpSegment = 1
-		var bufferSize = Settings.BufferSize * 1024
-		var stream = playlist.Streams[streamID]
-		var buf bytes.Buffer
-		var fileSize = 0
-		var streamStatus = make(chan bool)
+	var playlist = p.(Playlist)
+	var debug, path, options, bufferType string
+	var bufferSize = Settings.BufferSize * 1024
+	var stream = playlist.Streams[streamID]
+	var clientKey = playlistID + stream.MD5
+	var fileSize = 0
 
-		var tmpFolder = playlist.Streams[streamID].Folder
-		var url = playlist.Streams[streamID].URL
-		if useBackup {
-			if backupNumber >= 1 && backupNumber <= 3 {
-				switch backupNumber {
-				case 1:
-					if stream.BackupChannel1 != nil {
-						url = stream.BackupChannel1.URL
-						showHighlight("START OF BACKUP 1 STREAM")
-						showInfo("Backup Channel 1 URL: " + url)
-					}
-				case 2:
-					if stream.BackupChannel2 != nil {
-						url = stream.BackupChannel2.URL
-						showHighlight("START OF BACKUP 2 STREAM")
-						showInfo("Backup Channel 2 URL: " + url)
-					}
-				case 3:
-					if stream.BackupChannel3 != nil {
-						url = stream.BackupChannel3.URL
-						showHighlight("START OF BACKUP 3 STREAM")
-						showInfo("Backup Channel 3 URL: " + url)
-					}
-				}
+	if bufferSize <= 0 {
+		bufferSize = 1024 * 1024
+	}
+
+	var tmpFolder = stream.Folder
+	var url = stream.URL
+	if useBackup {
+		switch backupNumber {
+		case 1:
+			if stream.BackupChannel1 != nil {
+				url = stream.BackupChannel1.URL
+				showHighlight("START OF BACKUP 1 STREAM")
+				showInfo("Backup Channel 1 URL: " + url)
+			}
+		case 2:
+			if stream.BackupChannel2 != nil {
+				url = stream.BackupChannel2.URL
+				showHighlight("START OF BACKUP 2 STREAM")
+				showInfo("Backup Channel 2 URL: " + url)
+			}
+		case 3:
+			if stream.BackupChannel3 != nil {
+				url = stream.BackupChannel3.URL
+				showHighlight("START OF BACKUP 3 STREAM")
+				showInfo("Backup Channel 3 URL: " + url)
 			}
 		}
+	}
 
-		stream.Status = false
+	stream.Status = false
 
-		bufferType = strings.ToUpper(playlist.Buffer)
+	bufferType = strings.ToUpper(playlist.Buffer)
 
-		switch playlist.Buffer {
+	switch playlist.Buffer {
 
-		case "ffmpeg":
+	case "ffmpeg":
 
-			if Settings.FFmpegForceHttp {
-				url = strings.Replace(url, "https://", "http://", -1)
-				showInfo("Forcing URL to HTTP for FFMPEG: " + url)
-			}
+		if Settings.FFmpegForceHttp {
+			url = strings.Replace(url, "https://", "http://", -1)
+			showInfo("Forcing URL to HTTP for FFMPEG: " + url)
+		}
 
-			path = Settings.FFmpegPath
-			options = Settings.FFmpegOptions
+		path = Settings.FFmpegPath
+		options = Settings.FFmpegOptions
 
-		case "vlc":
-			path = Settings.VLCPath
-			options = Settings.VLCOptions
+	case "vlc":
+		path = Settings.VLCPath
+		options = Settings.VLCOptions
 
-		default:
+	default:
+		return
+	}
+
+	// Fail over to the next configured backup channel. When none is left,
+	// pass the error to the viewers so they disconnect and free the tuner.
+	//
+	// Viewers remove themselves (killClientConnection) once they see the
+	// error, so the buffer must not decrement their connection count itself.
+	var addErrorToStream = func(err error) {
+		if next := nextBackup(stream, backupNumber); next > 0 {
+			thirdPartyBuffer(streamID, playlistID, true, next)
 			return
 		}
 
-		var addErrorToStream = func(err error) {
-			if !useBackup || (useBackup && backupNumber >= 0 && backupNumber <= 3) {
-				backupNumber = backupNumber + 1
-				if stream.BackupChannel1 != nil || stream.BackupChannel2 != nil || stream.BackupChannel3 != nil {
-					thirdPartyBuffer(streamID, playlistID, true, backupNumber)
-				}
-				return
-			}
-
-			var stream = playlist.Streams[streamID]
-
-			if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
-
-				var clients = c.(ClientConnection)
-				clients.Error = err
-				BufferClients.Store(playlistID+stream.MD5, clients)
-
-			}
-
+		Lock.Lock()
+		if c, ok := BufferClients.Load(clientKey); ok {
+			var clients = c.(ClientConnection)
+			clients.Error = err
+			BufferClients.Store(clientKey, clients)
 		}
+		Lock.Unlock()
+	}
 
+	// Only a fresh start clears the folder. On failover the viewers are still
+	// reading from it, and the new process continues the segment numbering.
+	if !useBackup {
 		if err := bufferVFS.RemoveAll(getPlatformPath(tmpFolder)); err != nil {
 			ShowError(err, 4005)
 		}
+	}
 
-		err := checkVFSFolder(tmpFolder, bufferVFS)
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
+	err := checkVFSFolder(tmpFolder, bufferVFS)
+	if err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
 
-		err = checkFile(path)
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
+	err = checkFile(path)
+	if err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
 
-		showInfo(fmt.Sprintf("%s path:%s", bufferType, path))
-		showInfo("Streaming URL:" + url)
+	showInfo(fmt.Sprintf("%s path:%s", bufferType, path))
+	showInfo("Streaming URL:" + url)
 
-		var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
+	// Viewers only send segments numbered higher than the last one they sent,
+	// so after a failover the numbering must continue, not restart at 1.ts.
+	var tmpSegment = lastSegmentNumber(tmpFolder) + 1
+	var firstSegment = tmpSegment
+	var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
 
-		f, err := bufferVFS.Create(tmpFile)
-		f.Close()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
+	// Set User-Agent
+	var args []string
 
-		//args = strings.Replace(args, "[USER-AGENT]", Settings.UserAgent, -1)
+	for i, a := range strings.Split(options, " ") {
 
-		// Set User-Agent
-		var args []string
-
-		for i, a := range strings.Split(options, " ") {
-
-			switch bufferType {
-			case "FFMPEG":
-				a = strings.Replace(a, "[URL]", url, -1)
-				if i == 0 {
-					if len(Settings.UserAgent) != 0 {
-						args = []string{"-user_agent", Settings.UserAgent}
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-					var headers string
-					if len(playlist.HttpUserReferer) != 0 {
-						headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
-					}
-					if len(playlist.HttpUserOrigin) != 0 {
-						headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
-					}
-					if headers != "" {
-						args = append(args, "-headers", headers)
-					}
+		switch bufferType {
+		case "FFMPEG":
+			a = strings.Replace(a, "[URL]", url, -1)
+			if i == 0 {
+				if len(Settings.UserAgent) != 0 {
+					args = []string{"-user_agent", Settings.UserAgent}
 				}
 
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+
+				var headers string
+				if len(playlist.HttpUserReferer) != 0 {
+					headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
+				}
+				if len(playlist.HttpUserOrigin) != 0 {
+					headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
+				}
+				if headers != "" {
+					args = append(args, "-headers", headers)
+				}
+			}
+
+			args = append(args, a)
+
+		case "VLC":
+			if a == "[URL]" {
+				a = strings.Replace(a, "[URL]", url, -1)
 				args = append(args, a)
 
-			case "VLC":
-				if a == "[URL]" {
-					a = strings.Replace(a, "[URL]", url, -1)
-					args = append(args, a)
-
-					if len(Settings.UserAgent) != 0 {
-						args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
-					}
-
-					if len(playlist.HttpUserReferer) != 0 {
-						args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-				} else {
-					args = append(args, a)
+				if len(Settings.UserAgent) != 0 {
+					args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
 				}
 
+				if len(playlist.HttpUserReferer) != 0 {
+					args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
+				}
+
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+
+			} else {
+				args = append(args, a)
 			}
 
 		}
-
-		var cmd = exec.Command(path, args...)
-		// Set this explicitly to avoid issues with VLC
-		cmd.Env = append(os.Environ(), "DISPLAY=:0")
-
-		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", bufferType, path, args)
-		showDebug(debug, 1)
-
-		// Byte data from the process
-		stdOut, err := cmd.StdoutPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		// Log data from the process
-		logOut, err := cmd.StderrPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		if len(buf.Bytes()) == 0 && !stream.Status {
-			showInfo(bufferType + ":Processing data")
-		}
-
-		cmd.Start()
-		defer cmd.Wait()
-
-		go func() {
-
-			// Display log data from the process in debug mode 1.
-			scanner := bufio.NewScanner(logOut)
-			scanner.Split(bufio.ScanLines)
-
-			for scanner.Scan() {
-
-				debug = fmt.Sprintf("%s log:%s", bufferType, strings.TrimSpace(scanner.Text()))
-
-				select {
-				case <-streamStatus:
-					showDebug(debug, 1)
-				default:
-					showInfo(debug)
-				}
-
-				time.Sleep(time.Duration(10) * time.Millisecond)
-
-			}
-
-		}()
-
-		f, err = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		defer f.Close()
-
-		buffer := make([]byte, 1024*4)
-
-		reader := bufio.NewReader(stdOut)
-
-		t := make(chan int)
-
-		go func() {
-
-			var timeout = 0
-			for {
-				time.Sleep(time.Duration(1000) * time.Millisecond)
-				timeout++
-
-				select {
-				case <-t:
-					return
-				default:
-					// Check if the channel is closed before sending
-					select {
-					case t <- timeout:
-					default:
-					}
-				}
-
-			}
-
-		}()
-
-		for {
-
-			select {
-			case timeout := <-t:
-				if timeout >= 20 && tmpSegment == 1 {
-					cmd.Process.Kill()
-					err = errors.New("Timeout")
-					ShowError(err, 4006)
-					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
-					f.Close()
-					return
-				}
-
-			default:
-
-			}
-
-			if fileSize == 0 && !stream.Status {
-				showInfo("Streaming Status:Receive data from " + bufferType)
-			}
-
-			if !clientConnection(stream) {
-				cmd.Process.Kill()
-				f.Close()
-				cmd.Wait()
-				return
-			}
-
-			n, err := reader.Read(buffer)
-			if err == io.EOF {
-				break
-			}
-
-			fileSize = fileSize + len(buffer[:n])
-
-			if _, err := f.Write(buffer[:n]); err != nil {
-				cmd.Process.Kill()
-				ShowError(err, 0)
-				killClientConnection(streamID, playlistID, false)
-				addErrorToStream(err)
-				cmd.Wait()
-				return
-			}
-
-			if fileSize >= bufferSize/2 {
-
-				if tmpSegment == 1 && !stream.Status {
-					close(t)
-					close(streamStatus)
-					showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", bufferType))
-				}
-
-				f.Close()
-				tmpSegment++
-
-				if !stream.Status {
-					Lock.Lock()
-					stream.Status = true
-					playlist.Streams[streamID] = stream
-					BufferInformation.Store(playlistID, playlist)
-					Lock.Unlock()
-				}
-
-				tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
-
-				fileSize = 0
-
-				var errCreate, errOpen error
-				_, errCreate = bufferVFS.Create(tmpFile)
-				f, errOpen = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
-				if errCreate != nil || errOpen != nil {
-					cmd.Process.Kill()
-					ShowError(err, 0)
-					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
-					return
-				}
-
-			}
-
-		}
-
-		cmd.Process.Kill()
-		cmd.Wait()
-
-		err = errors.New(bufferType + " error")
-		addErrorToStream(err)
-		ShowError(err, 1204)
-
-		time.Sleep(time.Duration(500) * time.Millisecond)
-		clientConnection(stream)
-
-		return
 
 	}
+
+	var cmd = exec.Command(path, args...)
+	// Set this explicitly to avoid issues with VLC
+	cmd.Env = append(os.Environ(), "DISPLAY=:0")
+
+	debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", bufferType, path, args)
+	showDebug(debug, 1)
+
+	// Byte data from the process
+	stdOut, err := cmd.StdoutPipe()
+	if err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
+
+	// Log data from the process
+	logOut, err := cmd.StderrPipe()
+	if err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
+
+	f, err := bufferVFS.Create(tmpFile)
+	if err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
+	defer func() { f.Close() }() // f is replaced on every new segment
+
+	showInfo(bufferType + ":Processing data")
+
+	if err = cmd.Start(); err != nil {
+		ShowError(err, 0)
+		addErrorToStream(err)
+		return
+	}
+	var startTime = time.Now()
+
+	// Closed once the first segment is complete.
+	var started = make(chan struct{})
+
+	go func() {
+
+		// Show the process log: as info until the stream is running, then
+		// only in debug mode 1. Never sleep here: if stderr is not drained
+		// the pipe fills up, the process blocks, and the video stalls.
+		scanner := bufio.NewScanner(logOut)
+		scanner.Split(bufio.ScanLines)
+
+		for scanner.Scan() {
+
+			var msg = fmt.Sprintf("%s log:%s", bufferType, strings.TrimSpace(scanner.Text()))
+
+			select {
+			case <-started:
+				showDebug(msg, 1)
+			default:
+				showInfo(msg)
+			}
+
+		}
+
+		// Keep draining if the scanner stopped early (e.g. an over-long line).
+		io.Copy(io.Discard, logOut)
+
+	}()
+
+	// Watchdog: the read below blocks while the process sends nothing, so
+	// stall detection and "every viewer has left" have to run alongside it.
+	// Stopping the process unblocks the read.
+	var lastData atomic.Int64
+	lastData.Store(startTime.UnixNano())
+	var stalled atomic.Bool
+	var watchdogDone = make(chan struct{})
+	var stopWatchdog = sync.OnceFunc(func() { close(watchdogDone) })
+	defer stopWatchdog()
+
+	go func() {
+
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-watchdogDone:
+				return
+			case <-ticker.C:
+			}
+
+			if _, ok := BufferClients.Load(clientKey); !ok {
+				cmd.Process.Kill()
+				return
+			}
+
+			select {
+			case <-started:
+				if time.Since(time.Unix(0, lastData.Load())) > bufferStallTimeout {
+					stalled.Store(true)
+					cmd.Process.Kill()
+					return
+				}
+			default:
+				if time.Since(startTime) > bufferStartTimeout {
+					stalled.Store(true)
+					cmd.Process.Kill()
+					return
+				}
+			}
+		}
+
+	}()
+
+	// Stops the process and the watchdog after a failure, then fails over or
+	// passes the error to the viewers.
+	var fail = func(err error) {
+		stopWatchdog()
+		cmd.Process.Kill()
+		cmd.Wait()
+		ShowError(err, 0)
+		addErrorToStream(err)
+	}
+
+	showInfo("Streaming Status:Receive data from " + bufferType)
+
+	buffer := make([]byte, bufferReadSize)
+
+	for {
+
+		n, readErr := stdOut.Read(buffer)
+
+		if n > 0 {
+
+			lastData.Store(time.Now().UnixNano())
+			fileSize += n
+
+			if _, err := f.Write(buffer[:n]); err != nil {
+				fail(err)
+				return
+			}
+
+		}
+
+		if readErr != nil {
+			// EOF: the process exited or was stopped by the watchdog.
+			break
+		}
+
+		if fileSize >= bufferSize/2 {
+
+			if tmpSegment == firstSegment {
+				close(started)
+				showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", bufferType))
+			}
+
+			f.Close()
+			tmpSegment++
+
+			if !stream.Status {
+				Lock.Lock()
+				stream.Status = true
+				playlist.Streams[streamID] = stream
+				BufferInformation.Store(playlistID, playlist)
+				Lock.Unlock()
+			}
+
+			tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
+
+			fileSize = 0
+
+			if f, err = bufferVFS.Create(tmpFile); err != nil {
+				fail(err)
+				return
+			}
+
+		}
+
+	}
+
+	stopWatchdog()
+	cmd.Process.Kill()
+	cmd.Wait()
+
+	// Every viewer has left: just clean up.
+	if _, ok := BufferClients.Load(clientKey); !ok {
+		clientConnection(stream)
+		return
+	}
+
+	if stalled.Load() {
+		select {
+		case <-started:
+			err = fmt.Errorf("%s: no data from the source for %v", bufferType, bufferStallTimeout)
+		default:
+			err = errors.New("Timeout")
+		}
+		ShowError(err, 4006)
+	} else {
+		err = errors.New(bufferType + " error")
+		ShowError(err, 1204)
+	}
+
+	addErrorToStream(err)
+
+	time.Sleep(time.Duration(500) * time.Millisecond)
+	clientConnection(stream)
 
 }
 

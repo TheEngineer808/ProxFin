@@ -345,19 +345,23 @@ func createXEPGDatabase() (err error) {
 	saveMapToJSONFile(System.File.URLS, Data.Cache.StreamingURLS)
 
 	Data.Cache.Streams.Active = make([]string, 0, System.UnfilteredChannelLimit)
-	Settings = SettingsStruct{}
 	Data.XEPG.Channels, err = loadJSONFileToMap(System.File.XEPG)
 	if err != nil {
 		ShowError(err, 1004)
 		return err
 	}
 
+	// Reload the settings from disk into a separate struct and swap it in at
+	// the end. Blanking the live Settings first left streams tuned during the
+	// rebuild with no buffer type, ffmpeg path or buffer size.
 	settings, err := loadJSONFileToMap(System.File.Settings)
 	if err != nil || len(settings) == 0 {
 		return
 	}
 	settings_json, _ := json.Marshal(settings)
-	json.Unmarshal(settings_json, &Settings)
+	var reloaded SettingsStruct
+	json.Unmarshal(settings_json, &reloaded)
+	Settings = reloaded
 
 	// Remove duplicate channels from existing XEPG database based on new hash logic
 	removeDuplicateChannels()

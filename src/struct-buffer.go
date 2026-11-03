@@ -70,9 +70,6 @@ type ThisStream struct {
 
 	DynamicStream map[int]DynamicStream
 
-	// Lokale Temp Datein
-	OldSegments []string
-
 	ClientID string
 }
 
