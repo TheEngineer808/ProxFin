@@ -628,7 +628,10 @@ class SettingsCategoryItem extends SettingsCategory {
         var headline = this.createCategoryHeadline(this.headline);
         var settingsKeys = this.settingsKeys;
         var doc = document.getElementById(this.DocumentID);
-        doc.appendChild(headline);
+        // Each category is rendered as its own card
+        var section = document.createElement("SECTION");
+        section.className = "settings-section";
+        section.appendChild(headline);
         // Tabelle für die Kategorie erstellen
         var table = document.createElement("TABLE");
         var keys = settingsKeys.split(",");
@@ -649,8 +652,8 @@ class SettingsCategoryItem extends SettingsCategory {
                     break;
             }
         });
-        doc.appendChild(table);
-        doc.appendChild(this.createHR());
+        section.appendChild(table);
+        doc.appendChild(section);
     }
 }
 function showSettings() {

@@ -225,6 +225,7 @@
     }
   },
   "mapping": {
+    "inactiveChannels": "Inactive channels",
     "table": {
       "chNo": "Ch. No.",
       "logo": "Logo",
