@@ -1,11 +1,13 @@
 package src
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,22 +15,23 @@ import (
 	"time"
 )
 
-// These tests drive the real ffmpeg buffer path (bufferingStream ->
-// thirdPartyBuffer) against a fake "ffmpeg" shell script. The script receives
-// the stream URL as its only argument and treats it as a behaviour mode:
-//
-// (anything after the mode, e.g. "stream?x", only makes the URL unique)
+// These tests drive the whole buffer (HTTP handler, stream manager, real
+// processes) against a fake "ffmpeg" shell script. The script receives the
+// stream URL as its only argument and treats it as a behaviour mode
+// (anything after the mode, e.g. "stream?x", only makes the URL unique):
 //
 //	stream  - emit ~1.3 MB/s forever
 //	short   - emit ~1.3 MB/s for ~3 s, then exit (upstream dropped)
 //	hang    - emit ~1.3 MB/s for ~1 s, then stop sending without exiting
 //	          (upstream stalled)
+//	fail    - print an error and exit at once (e.g. HTTP 404)
 const fakeFFmpegScript = `#!/bin/sh
 burst() { head -c 65536 /dev/zero; sleep 0.05; }
 case "$1" in
   stream*) while :; do burst; done ;;
   short*)  i=0; while [ $i -lt 60 ]; do burst; i=$((i+1)); done ;;
   hang*)   i=0; while [ $i -lt 20 ]; do burst; i=$((i+1)); done; exec sleep 3600 ;;
+  fail*)   echo "Server returned 404 Not Found" >&2; exit 1 ;;
 esac
 `
 
@@ -39,9 +42,8 @@ var (
 	bufferTestScript string
 )
 
-// setupBufferTest configures the globals once for all buffer tests. They are
-// not reset per test: a previous test's buffer goroutine may still be doing
-// its final cleanup, and every test uses its own stream URLs anyway.
+// setupBufferTest configures the globals once for all buffer tests. Every
+// test uses its own stream URLs.
 func setupBufferTest(t *testing.T) {
 	t.Helper()
 
@@ -59,11 +61,14 @@ func setupBufferTest(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		initBufferVFS()
-		System.Folder.Temp = "/tmp/threadfin-test/"
 		System.Flag.Info = true // keep the test output readable
+		loadHTMLMap()           // embedded files, for the tuner-limit video
 
-		Settings.BufferSize = 256 // KB -> 128 KB segments
+		bufferTuning.StartTimeout = 3 * time.Second
+		bufferTuning.StallTimeout = 2 * time.Second
+		bufferTuning.Linger = time.Second
+
+		Settings.BufferSize = 256 // KB
 		Settings.BufferTimeout = 0
 		Settings.UserAgent = ""
 		Settings.FFmpegPath = bufferTestScript
@@ -77,15 +82,16 @@ func setupBufferTest(t *testing.T) {
 		}
 	})
 
-	// Once every viewer has disconnected, the buffer must stop its process.
+	// Once every viewer has left, the stream must stop with its process.
 	t.Cleanup(func() {
 		deadline := time.Now().Add(5 * time.Second)
-		for countProcesses(bufferTestScript) > 0 {
+		for countProcesses(bufferTestScript) > 0 || streamManager.Stats().Streams > 0 {
 			if time.Now().After(deadline) {
-				t.Errorf("buffer process still running 5s after all viewers left")
+				t.Errorf("stream still running 5s after all viewers left: %+v, %d processes",
+					streamManager.Stats(), countProcesses(bufferTestScript))
 				return
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 	})
 }
@@ -104,15 +110,18 @@ func countProcesses(arg string) (n int) {
 
 // streamResult records what a client received.
 type streamResult struct {
+	status  int
+	data    []byte
 	bytes   int64
+	first   time.Duration // time to the first byte
 	maxGap  time.Duration // longest pause between two reads
 	ended   bool          // server closed the response
 	endedAt time.Duration // time from request start to end of response
 }
 
 // watchStream requests the stream and reads it until the server ends the
-// response or `limit` elapses.
-func watchStream(t *testing.T, srv *httptest.Server, path string, limit time.Duration) streamResult {
+// response or `limit` elapses. With keep set it records the data.
+func watchStream(t *testing.T, srv *httptest.Server, path string, limit time.Duration, keep bool) streamResult {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
@@ -126,26 +135,32 @@ func watchStream(t *testing.T, srv *httptest.Server, path string, limit time.Dur
 	}
 	defer resp.Body.Close()
 
-	var res streamResult
+	res := streamResult{status: resp.StatusCode}
 	buf := make([]byte, 64*1024)
 	last := time.Now()
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			if gap := time.Since(last); gap > res.maxGap {
+			if res.bytes == 0 {
+				res.first = time.Since(start)
+			} else if gap := time.Since(last); gap > res.maxGap {
 				res.maxGap = gap
 			}
 			last = time.Now()
 			res.bytes += int64(n)
+			if keep {
+				res.data = append(res.data, buf[:n]...)
+			}
 		}
 		if err != nil {
 			if err == io.EOF || ctx.Err() == nil {
 				res.ended = true
 				res.endedAt = time.Since(start)
 			}
-			// Count the silence before the client gave up as a gap too.
-			if gap := time.Since(last); gap > res.maxGap {
-				res.maxGap = gap
+			if res.bytes > 0 {
+				if gap := time.Since(last); gap > res.maxGap {
+					res.maxGap = gap
+				}
 			}
 			return res
 		}
@@ -159,97 +174,254 @@ func newBufferServer(t *testing.T, primary string, backup *BackupStream) *httpte
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		url := primary
-		if r.URL.Path == "/second" {
-			url = "stream?second-" + t.Name()
+		if r.URL.Path != "/" {
+			url = "stream?" + r.URL.Path + "-" + t.Name()
 		}
 		bufferingStream(testPlaylistID, url, backup, nil, nil, "chan"+r.URL.Path, w, r)
 	}))
 }
 
-// Issue: on failover the buffer restarted its segment numbering at 1.ts while
-// each viewer remembered the names it had already sent, so the viewer skipped
-// the backup's segments (freeze) or was dropped mid-restart.
+// A source that drops is replaced by its backup without the viewer
+// noticing (the previous buffer froze the viewer here).
 func TestBufferFailoverKeepsStreaming(t *testing.T) {
 	setupBufferTest(t)
 
 	srv := newBufferServer(t, "short", &BackupStream{PlaylistID: testPlaylistID, URL: "stream"})
 	defer srv.Close()
 
-	res := watchStream(t, srv, "/", 9*time.Second)
-	t.Logf("received %d bytes, longest gap %v, ended=%v", res.bytes, res.maxGap, res.ended)
+	res := watchStream(t, srv, "/", 9*time.Second, false)
+	t.Logf("received %d bytes, first byte after %v, longest gap %v, ended=%v", res.bytes, res.first, res.maxGap, res.ended)
 
 	if res.ended {
 		t.Fatalf("stream ended after %v instead of failing over to the backup", res.endedAt)
 	}
-	if res.maxGap > 2*time.Second {
-		t.Fatalf("viewer froze for %v during failover (want < 2s)", res.maxGap)
+	if res.maxGap > 500*time.Millisecond {
+		t.Fatalf("viewer froze for %v during failover", res.maxGap)
 	}
 }
 
-// Issue: with no backup configured, the error was never passed to viewers, so
-// they sat on a dead stream (holding a tuner) until the player gave up.
+// When every source has failed, the viewer is disconnected (and the tuner
+// freed) instead of being left on a dead stream.
 func TestBufferSourceExitEndsResponse(t *testing.T) {
 	setupBufferTest(t)
 
 	srv := newBufferServer(t, "short", nil)
 	defer srv.Close()
 
-	res := watchStream(t, srv, "/", 12*time.Second)
+	// The source is reconnected once (it may have been a hiccup), then the
+	// stream gives up.
+	res := watchStream(t, srv, "/", 12*time.Second, false)
 	t.Logf("received %d bytes, response ended after %v", res.bytes, res.endedAt)
 
 	if !res.ended {
-		t.Fatalf("response still open 12s after the source exited at ~3s")
+		t.Fatalf("response still open 12s after the source failed")
 	}
 	if res.bytes == 0 {
 		t.Fatalf("no data received before the source exited")
 	}
 }
 
-// Issue: a source that stops sending without disconnecting blocked the
-// buffer's read forever; the startup timeout could never fire.
+// A source that stops sending without disconnecting is detected.
 func TestBufferStalledSourceEndsResponse(t *testing.T) {
 	setupBufferTest(t)
 
 	srv := newBufferServer(t, "hang", nil)
 	defer srv.Close()
 
-	res := watchStream(t, srv, "/", 30*time.Second)
+	res := watchStream(t, srv, "/", 15*time.Second, false)
 	t.Logf("received %d bytes, response ended after %v", res.bytes, res.endedAt)
 
 	if !res.ended {
-		t.Fatalf("response still open 30s after the source stalled at ~1s")
+		t.Fatalf("response still open 15s after the source stalled")
 	}
 }
 
-// Two channels from the same playlist share the Playlist maps. This passes on
-// its own; run it with -race to see the unsynchronised map access that can
-// crash the process ("concurrent map read and map write").
-//
-// The second tune is deliberately staggered. Tuning both at the same instant
-// is a known, separate bug: both requests can see the playlist as inactive
-// and create it, the second overwrites the first, and about 1 run in 6 leaves
-// an ffmpeg process running after its viewer has gone.
-func TestBufferTwoChannelsSamePlaylist(t *testing.T) {
+// A channel that cannot start gets a proper error, like from a real
+// HDHomeRun, instead of an empty video.
+func TestBufferFailedChannelGets503(t *testing.T) {
+	setupBufferTest(t)
+
+	srv := newBufferServer(t, "fail", nil)
+	defer srv.Close()
+
+	res := watchStream(t, srv, "/", 5*time.Second, false)
+	if res.status != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", res.status)
+	}
+}
+
+// Two channels of one playlist tuned at the same instant, several times:
+// each gets its own stream and data (the previous buffer could mix them up
+// and leave a process running).
+func TestBufferSimultaneousTunesOnOnePlaylist(t *testing.T) {
 	setupBufferTest(t)
 
 	srv := newBufferServer(t, "stream", nil)
 	defer srv.Close()
 
-	var wg sync.WaitGroup
-	results := make([]streamResult, 2)
-	for i, path := range []string{"/", "/second"} {
-		wg.Add(1)
-		go func(i int, path string) {
-			defer wg.Done()
-			time.Sleep(time.Duration(i) * 1500 * time.Millisecond)
-			results[i] = watchStream(t, srv, path, 5*time.Second)
-		}(i, path)
-	}
-	wg.Wait()
-
-	for i, res := range results {
-		if res.bytes == 0 {
-			t.Fatalf("client %d received no data", i)
+	for round := 0; round < 3; round++ {
+		var wg sync.WaitGroup
+		results := make([]streamResult, 4)
+		for i, path := range []string{"/a", "/b", "/a", "/b"} {
+			wg.Add(1)
+			go func(i int, path string) {
+				defer wg.Done()
+				results[i] = watchStream(t, srv, path, 2*time.Second, false)
+			}(i, path)
 		}
+		wg.Wait()
+
+		for i, res := range results {
+			if res.bytes == 0 {
+				t.Fatalf("round %d: client %d received no data", round, i)
+			}
+		}
+	}
+}
+
+func TestBufferTunerLimitPlaysLimitVideo(t *testing.T) {
+	setupBufferTest(t)
+
+	systemMutex.Lock()
+	Settings.Files.M3U["Mlimit"] = map[string]interface{}{"buffer": "ffmpeg", "tuner": "1", "name": "limited"}
+	systemMutex.Unlock()
+	defer func() {
+		systemMutex.Lock()
+		delete(Settings.Files.M3U, "Mlimit")
+		systemMutex.Unlock()
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bufferingStream("Mlimit", "stream?"+r.URL.Path+t.Name(), nil, nil, nil, "chan", w, r)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/one", nil)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	eventually(t, 3*time.Second, func() bool { return streamManager.Stats().Viewers == 1 })
+
+	res := watchStream(t, srv, "/two", 3*time.Second+bufferTuning.TunerWait, true)
+	cancel()
+
+	want := []byte(GetHTMLString(webUI["html/video/stream-limit.ts"].(string)))
+	if res.status != http.StatusOK || !bytes.HasPrefix(res.data, want[:1024]) {
+		t.Fatalf("second channel did not get the tuner-limit video (status %d, %d bytes)", res.status, res.bytes)
+	}
+}
+
+func eventually(t *testing.T, d time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %v", d)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ---- real ffmpeg ------------------------------------------------------
+
+// useRealFFmpeg makes the buffer run real ffmpeg, generating a live 25 fps
+// H.264/AAC test channel with a keyframe every 2 s.
+func useRealFFmpeg(t *testing.T) {
+	setupBufferTest(t)
+
+	path, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	oldPath, oldOptions := Settings.FFmpegPath, Settings.FFmpegOptions
+	Settings.FFmpegPath = path
+	Settings.FFmpegOptions = "-hide_banner -loglevel error -re -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=1000 -c:v libx264 -preset ultrafast -g 50 -b:v 2M -c:a aac -f mpegts pipe:1"
+	t.Cleanup(func() {
+		eventually(t, 5*time.Second, func() bool { return streamManager.Stats().Streams == 0 })
+		Settings.FFmpegPath, Settings.FFmpegOptions = oldPath, oldOptions
+	})
+}
+
+// completeFrames cuts a capture before its last video frame, which the
+// client may have stopped reading in the middle of (ffmpeg puts video on
+// PID 0x100).
+func completeFrames(data []byte) []byte {
+	n := len(data) / 188 * 188
+	for off := n - 188; off >= 0; off -= 188 {
+		p := data[off:]
+		if p[0] == 0x47 && p[1]&0x40 != 0 && uint16(p[1]&0x1f)<<8|uint16(p[2]) == 0x100 {
+			return data[:off]
+		}
+	}
+	return data[:n]
+}
+
+// decodeErrors decodes a captured stream with ffmpeg and returns its error
+// output (empty means it decoded cleanly from the first byte).
+func decodeErrors(t *testing.T, data []byte) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "capture.ts")
+	if err := os.WriteFile(file, completeFrames(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("ffmpeg", "-hide_banner", "-v", "error", "-i", file, "-f", "null", "-").CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
+func firstVideoFrameType(t *testing.T, data []byte) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "probe.ts")
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pict_type",
+		"-read_intervals", "%+#1", "-of", "csv=p=0", file).Output()
+	if err != nil {
+		t.Fatalf("ffprobe: %v", err)
+	}
+	return strings.Trim(string(out), ", \n")
+}
+
+// A viewer joining a running channel starts at once, on a keyframe with
+// the program tables first, and decodes without a single error.
+func TestBufferRealFFmpegJoinerStartsCleanly(t *testing.T) {
+	useRealFFmpeg(t)
+
+	srv := newBufferServer(t, "live", nil)
+	defer srv.Close()
+
+	firstViewer := make(chan streamResult)
+	go func() { firstViewer <- watchStream(t, srv, "/", 7*time.Second, true) }()
+	time.Sleep(3500 * time.Millisecond) // join mid-GOP
+
+	joiner := watchStream(t, srv, "/", 3*time.Second, true)
+	first := <-firstViewer
+
+	t.Logf("first viewer: first byte after %v, %d bytes", first.first, first.bytes)
+	t.Logf("joiner: first byte after %v, %d bytes", joiner.first, joiner.bytes)
+
+	for name, res := range map[string]streamResult{"first viewer": first, "joiner": joiner} {
+		if pid := uint16(res.data[1]&0x1f)<<8 | uint16(res.data[2]); res.data[0] != 0x47 || pid != 0 {
+			t.Errorf("%s: stream does not start with the PAT", name)
+		}
+		if ft := firstVideoFrameType(t, res.data); ft != "I" {
+			t.Errorf("%s: first video frame is %q, want a keyframe (I)", name, ft)
+		}
+		if errs := decodeErrors(t, res.data); errs != "" {
+			t.Errorf("%s: decode errors:\n%s", name, errs)
+		}
+	}
+
+	if joiner.first > 200*time.Millisecond {
+		t.Errorf("joiner waited %v for its first byte", joiner.first)
+	}
+	if joiner.bytes < int64(Settings.BufferSize*1024) {
+		t.Errorf("joiner received %d bytes in 3 s, want at least the %d KB cushion", joiner.bytes, Settings.BufferSize)
 	}
 }

@@ -485,9 +485,6 @@ func WS(w http.ResponseWriter, r *http.Request) {
 					response.Reload = true
 				}
 
-				// if Settings.StoreBufferInRAM != previousStoreBufferInRAM {
-				initBufferVFS()
-				// }
 			}
 
 		case "saveFilesM3U":

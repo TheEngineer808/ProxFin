@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/avfs/avfs"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -26,18 +25,6 @@ var Data DataStruct
 
 // SystemFiles : Alle Systemdateien
 var SystemFiles = []string{"authentication.json", "pms.json", "settings.json", "xepg.json", "urls.json"}
-
-// BufferInformation : Informationen über den Buffer (aktive Streams, maximale Streams)
-var BufferInformation sync.Map
-
-// bufferVFS : Filesystem to use for the Buffer
-var bufferVFS avfs.VFS
-
-// BufferClients : Anzahl der Clients die einen Stream über den Buffer abspielen
-var BufferClients sync.Map
-
-// Lock : Lock Map
-var Lock = sync.RWMutex{}
 
 var (
 	xepgMutex   sync.Mutex
