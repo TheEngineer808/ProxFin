@@ -3,6 +3,7 @@ package src
 import (
   b64 "encoding/base64"
   "fmt"
+  "path/filepath"
   "strings"
 )
 
@@ -13,6 +14,14 @@ func uploadLogo(input, filename string) (logoURL string, err error) {
   // BAse64 in bytes umwandeln un speichern
   sDec, err := b64.StdEncoding.DecodeString(b64data)
   if err != nil {
+    return
+  }
+
+  // The name comes from the web interface: keep only the file name, so
+  // "../" can't write outside the upload folder.
+  filename = filepath.Base(filepath.Clean("/" + strings.ReplaceAll(filename, "\\", "/")))
+  if filename == "/" || filename == "." || filename == ".." {
+    err = fmt.Errorf("invalid file name")
     return
   }
 
