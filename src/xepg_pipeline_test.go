@@ -97,3 +97,98 @@ func TestXMLTVGzipIsComplete(t *testing.T) {
 		t.Fatalf("gzip holds %d bytes, XML file %d", len(unpacked), len(raw))
 	}
 }
+
+// useSettings restores the settings when the test ends and sends saved
+// settings to a temporary file.
+func useSettings(t *testing.T, dir string) {
+	t.Helper()
+	savedSettings, savedSettingsFile, savedTemp := Settings, System.File.Settings, System.Folder.Temp
+	t.Cleanup(func() {
+		Settings, System.File.Settings, System.Folder.Temp = savedSettings, savedSettingsFile, savedTemp
+	})
+	System.File.Settings = filepath.Join(dir, "settings.json")
+}
+
+func writePlaylist(t *testing.T, id string, channels int) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	for i := 0; i < channels; i++ {
+		fmt.Fprintf(&b, "#EXTINF:-1 tvg-id=\"%s.%d\" tvg-name=\"%s %d\" group-title=\"%s\",%s %d\nhttp://provider.example/%s/%d.ts\n", id, i, id, i, id, id, i, id, i)
+	}
+	if err := os.WriteFile(System.Folder.Data+id+".m3u", []byte(b.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A playlist that failed to load was removed from the list being ranged
+// over: the next playlist was skipped and the last one loaded twice.
+func TestBuildDatabaseDVRWithMissingPlaylist(t *testing.T) {
+	dir := usePipelineFolders(t)
+	useSettings(t, dir)
+
+	Settings.Files.M3U = map[string]interface{}{}
+	Settings.Files.HDHR = map[string]interface{}{}
+	Settings.Filter = map[int64]interface{}{}
+	Settings.IgnoreFilters = true
+	for _, id := range []string{"M1", "M2", "M3", "M4", "M5", "M6"} {
+		Settings.Files.M3U[id] = map[string]interface{}{"name": "Playlist " + id}
+		if id != "M1" { // M1 has no local copy
+			writePlaylist(t, id, 5)
+		}
+	}
+
+	// The playlists are loaded in map order: repeat so that the missing
+	// one is not always near the end (where the bug did no harm).
+	for run := 0; run < 30; run++ {
+		buildDatabaseDVR()
+
+		perPlaylist := map[string]int{}
+		for _, s := range Data.Streams.All {
+			perPlaylist[s.(map[string]string)["_file.m3u.id"]]++
+		}
+		want := map[string]int{"M2": 5, "M3": 5, "M4": 5, "M5": 5, "M6": 5}
+		if fmt.Sprint(perPlaylist) != fmt.Sprint(want) {
+			t.Fatalf("run %d: streams per playlist %v, want %v", run, perPlaylist, want)
+		}
+		if len(Data.Streams.Active) != 25 {
+			t.Fatalf("run %d: %d active streams, want 25", run, len(Data.Streams.Active))
+		}
+	}
+}
+
+// An XMLTV file that failed to load was not removed from Data.XMLTV.Files;
+// the files after it were appended again instead.
+func TestCreateXEPGMappingDropsMissingXMLTV(t *testing.T) {
+	dir := usePipelineFolders(t)
+	useSettings(t, dir)
+
+	Settings.Files.XMLTV = map[string]interface{}{}
+	for _, id := range []string{"X1", "X2", "X3"} {
+		Settings.Files.XMLTV[id] = map[string]interface{}{"name": "Guide " + id}
+	}
+	for _, id := range []string{"X1", "X3"} { // X2 has no local copy
+		content := fmt.Sprintf(`<?xml version="1.0"?><tv><channel id="%s.ch"><display-name>%s</display-name></channel></tv>`, id, id)
+		if err := os.WriteFile(System.Folder.Data+id+".xml", []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for run := 0; run < 8; run++ {
+		Data.Cache.XMLTV = make(map[string]XMLTV)
+		createXEPGMapping()
+
+		var names []string
+		for _, f := range Data.XMLTV.Files {
+			names = append(names, filepath.Base(f))
+		}
+		if len(names) != 2 || strings.Contains(strings.Join(names, ","), "X2") {
+			t.Fatalf("run %d: XMLTV files %v, want X1.xml and X3.xml", run, names)
+		}
+		for _, f := range []string{"X1.xml", "X3.xml", "Threadfin Dummy"} {
+			if _, ok := Data.XMLTV.Mapping[f]; !ok {
+				t.Fatalf("run %d: mapping lacks %s", run, f)
+			}
+		}
+	}
+}

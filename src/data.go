@@ -821,7 +821,11 @@ func buildDatabaseDVR() (err error) {
 
 		var playlistFile = getLocalProviderFiles(fileType)
 
-		for n, i := range playlistFile {
+		// A playlist that fails to load is reported and contributes no
+		// streams. It used to be removed from playlistFile while ranging
+		// over it, which skipped the next playlist (whose channels the XEPG
+		// cleanup then deleted) and loaded the last one twice.
+		for _, i := range playlistFile {
 
 			var channels []interface{}
 			var groupTitle, tvgID, uuid int = 0, 0, 0
@@ -844,7 +848,6 @@ func buildDatabaseDVR() (err error) {
 				ShowError(err, 1005)
 				err = errors.New(playlistName + ": Local copy of the file no longer exists")
 				ShowError(err, 0)
-				playlistFile = append(playlistFile[:n], playlistFile[n+1:]...)
 			}
 
 			// Streams analysieren
