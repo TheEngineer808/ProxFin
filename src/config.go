@@ -37,7 +37,21 @@ var (
 	// Data.Streams, Data.XEPG); two runs at once crashed the process with
 	// "concurrent map writes". Only the entry points take it.
 	refreshMutex sync.Mutex
+
+	// providerMutex guards the provider entries in Settings.Files (M3U,
+	// HDHR, XMLTV). A refresh updates them in place (counters, last update,
+	// compatibility) while streams read them when tuning; a map read during
+	// a write is fatal. Writers hold it only for the update itself, never
+	// during a download or parse.
+	providerMutex sync.RWMutex
 )
+
+// withProviders runs f with providerMutex held for writing.
+func withProviders(f func()) {
+	providerMutex.Lock()
+	defer providerMutex.Unlock()
+	f()
+}
 
 // Init : Systeminitialisierung
 func Init() (err error) {

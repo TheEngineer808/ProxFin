@@ -292,20 +292,24 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			// Neue Providerdatei
 			dataID = indicator + randomString(19)
 			data.(map[string]interface{})["new"] = true
-			filesMap[dataID] = data
+			withProviders(func() { filesMap[dataID] = data })
 
 		} else {
 
 			// Bereits vorhandene Providerdatei
+			providerMutex.Lock()
 			for key, value := range data.(map[string]interface{}) {
 
-				var oldData = filesMap[dataID].(map[string]interface{})
-				oldData[key] = value
+				if oldData, ok := filesMap[dataID].(map[string]interface{}); ok {
+					oldData[key] = value
+				}
 
 			}
+			providerMutex.Unlock()
 
 		}
 
+		providerMutex.Lock()
 		switch fileType {
 
 		case "m3u":
@@ -318,16 +322,21 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			Settings.Files.XMLTV = filesMap
 
 		}
+		providerMutex.Unlock()
 
 		// Neue Providerdatei
 		if _, ok := data.(map[string]interface{})["new"]; ok {
 
 			reloadData = true
 			err = getProviderData(fileType, dataID)
-			delete(data.(map[string]interface{}), "new")
+			withProviders(func() {
+				delete(data.(map[string]interface{}), "new")
+				if err != nil {
+					delete(filesMap, dataID)
+				}
+			})
 
 			if err != nil {
-				delete(filesMap, dataID)
 				return
 			}
 
@@ -414,8 +423,14 @@ func deleteLocalProviderFiles(dataID, fileType string) {
 		fileExtension = ".xml"
 	}
 
-	if _, ok := removeData[dataID]; ok {
+	providerMutex.Lock()
+	_, ok := removeData[dataID]
+	if ok {
 		delete(removeData, dataID)
+	}
+	providerMutex.Unlock()
+
+	if ok {
 		os.RemoveAll(System.Folder.Data + dataID + fileExtension)
 	}
 
@@ -1025,6 +1040,9 @@ func getLocalProviderFiles(fileType string) (localFiles []string) {
 // Providerparameter anhand von dem Key ausgeben
 func getProviderParameter(id, fileType, key string) (s string) {
 
+	providerMutex.RLock()
+	defer providerMutex.RUnlock()
+
 	var dataMap = make(map[string]interface{})
 
 	switch fileType {
@@ -1056,6 +1074,8 @@ func getProviderParameter(id, fileType, key string) (s string) {
 // Provider Statistiken Kompatibilität aktualisieren
 func setProviderCompatibility(id, fileType string, compatibility map[string]int) {
 
+	providerMutex.Lock()
+
 	var dataMap = make(map[string]interface{})
 
 	switch fileType {
@@ -1069,7 +1089,8 @@ func setProviderCompatibility(id, fileType string, compatibility map[string]int)
 		dataMap = Settings.Files.XMLTV
 	}
 
-	if data, ok := dataMap[id].(map[string]interface{}); ok {
+	data, ok := dataMap[id].(map[string]interface{})
+	if ok {
 
 		data["compatibility"] = compatibility
 
@@ -1082,8 +1103,13 @@ func setProviderCompatibility(id, fileType string, compatibility map[string]int)
 			Settings.Files.XMLTV = dataMap
 		}
 
-		saveSettings(Settings)
+	}
 
+	// saveSettings takes providerMutex itself.
+	providerMutex.Unlock()
+
+	if ok {
+		saveSettings(Settings)
 	}
 
 }

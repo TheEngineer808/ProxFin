@@ -275,11 +275,15 @@ func saveSettings(settings SettingsStruct) (err error) {
 		return
 	}
 
-	Settings = settings
+	// Replacing Settings replaces the provider maps that streams read
+	// under providerMutex.
+	withProviders(func() {
+		Settings = settings
 
-	if System.Dev == true {
-		Settings.UUID = "2019-01-DEV-Threadfin!"
-	}
+		if System.Dev == true {
+			Settings.UUID = "2019-01-DEV-Threadfin!"
+		}
+	})
 
 	setDeviceID()
 

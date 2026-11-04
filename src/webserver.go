@@ -198,6 +198,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 
 	var playListBuffer string
 	systemMutex.Lock()
+	providerMutex.RLock()
 	playListInterface := Settings.Files.M3U[streamInfo.PlaylistID]
 	if playListInterface == nil {
 		playListInterface = Settings.Files.HDHR[streamInfo.PlaylistID]
@@ -210,6 +211,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	providerMutex.RUnlock()
 	systemMutex.Unlock()
 
 	switch playListBuffer {
@@ -1152,6 +1154,7 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 
 	// Total connections for all playlists
 	totalPlaylistCount := 0
+	providerMutex.RLock()
 	if len(Settings.Files.M3U) > 0 {
 		for _, value := range Settings.Files.M3U {
 
@@ -1174,6 +1177,7 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 			}
 		}
 	}
+	providerMutex.RUnlock()
 
 	// Folgende Daten immer an den Client übergeben
 	defaults.ClientInfo.ARCH = System.ARCH

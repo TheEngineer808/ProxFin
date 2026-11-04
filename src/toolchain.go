@@ -260,6 +260,20 @@ func jsonToInterface(content string) (tmpMap interface{}, err error) {
 
 }
 
+// toFloat64 returns a number from a settings map as float64: decoded from
+// JSON it is a float64, set in code it may be an int.
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
 func saveMapToJSONFile(file string, tmpMap interface{}) error {
 
 	jsonString, err := json.MarshalIndent(tmpMap, "", "  ")

@@ -25,6 +25,8 @@ func getProviderData(fileType, fileID string) (err error) {
 
 		var data = make(map[string]interface{})
 
+		providerMutex.Lock()
+
 		if value, ok := dataMap[id].(map[string]interface{}); ok {
 			data = value
 		} else {
@@ -93,6 +95,8 @@ func getProviderData(fileType, fileID string) (err error) {
 			data["id.provider"] = id
 		}
 
+		providerMutex.Unlock()
+
 		// Datei extrahieren
 		body, err = extractGZIP(body, fileSource)
 		if err != nil {
@@ -149,8 +153,11 @@ func getProviderData(fileType, fileID string) (err error) {
 		err = writeByteToFile(filePath, body)
 
 		if err == nil {
-			data["last.update"] = time.Now().Format("2006-01-02 15:04:05")
-			data["counter.download"] = data["counter.download"].(float64) + 1
+			withProviders(func() {
+				downloads, _ := toFloat64(data["counter.download"])
+				data["last.update"] = time.Now().Format("2006-01-02 15:04:05")
+				data["counter.download"] = downloads + 1
+			})
 		}
 
 		return
@@ -194,7 +201,7 @@ func getProviderData(fileType, fileID string) (err error) {
 
 		if _, ok := data["new"]; ok {
 			newProvider = true
-			delete(data, "new")
+			withProviders(func() { delete(data, "new") })
 		}
 
 		// Wenn eine ID vorhanden ist und nicht mit der aus der Datanbank übereinstimmt, wird die Aktualisierung übersprungen (goto)
@@ -270,8 +277,12 @@ func getProviderData(fileType, fileID string) (err error) {
 				if value, ok := dataMap[dataID].(map[string]interface{}); ok {
 
 					data = value
-					data["counter.error"] = data["counter.error"].(float64) + 1
-					data["counter.download"] = data["counter.download"].(float64) + 1
+					withProviders(func() {
+						errors, _ := toFloat64(data["counter.error"])
+						downloads, _ := toFloat64(data["counter.download"])
+						data["counter.error"] = errors + 1
+						data["counter.download"] = downloads + 1
+					})
 
 				}
 
@@ -286,19 +297,23 @@ func getProviderData(fileType, fileID string) (err error) {
 
 			if value, ok := dataMap[dataID].(map[string]interface{}); ok {
 
-				var data = make(map[string]interface{})
-				data = value
+				var data = value
 
-				if data["counter.error"].(float64) == 0 {
-					data["provider.availability"] = 100
-				} else {
-					data["provider.availability"] = int(data["counter.error"].(float64)*100/data["counter.download"].(float64)*-1 + 100)
-				}
+				withProviders(func() {
+					errors, _ := toFloat64(data["counter.error"])
+					downloads, _ := toFloat64(data["counter.download"])
+					if errors == 0 || downloads == 0 {
+						data["provider.availability"] = 100
+					} else {
+						data["provider.availability"] = int(errors*100/downloads*-1 + 100)
+					}
+				})
 
 			}
 
 		}
 
+		providerMutex.Lock()
 		switch fileType {
 
 		case "m3u":
@@ -312,6 +327,7 @@ func getProviderData(fileType, fileID string) (err error) {
 			delete(Data.Cache.XMLTV, System.Folder.Data+dataID+fileExtension)
 
 		}
+		providerMutex.Unlock()
 
 		saveSettings(Settings)
 
