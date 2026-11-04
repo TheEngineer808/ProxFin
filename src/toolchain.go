@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -263,33 +262,66 @@ func jsonToInterface(content string) (tmpMap interface{}, err error) {
 
 func saveMapToJSONFile(file string, tmpMap interface{}) error {
 
-	var filename = getPlatformFile(file)
 	jsonString, err := json.MarshalIndent(tmpMap, "", "  ")
-
 	if err != nil {
 		return err
 	}
 
-	os.Create(filename)
-	err = os.WriteFile(filename, []byte(jsonString), 0644)
+	return writeFileAtomic(getPlatformFile(file), jsonString, 0644)
+}
+
+// writeFileAtomic replaces filename with data so that readers (and a
+// restart after a crash or power loss) see either the old or the new
+// content, never a truncated file: the data goes to a temporary file in the
+// same folder, is flushed to disk and then renamed over the original.
+func writeFileAtomic(filename string, data []byte, perm os.FileMode) (err error) {
+
+	tmp, err := os.CreateTemp(filepath.Dir(filename), "."+filepath.Base(filename)+".tmp*")
 	if err != nil {
 		return err
+	}
+
+	defer func() {
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
+
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+
+	if err = tmp.Chmod(perm); err != nil {
+		return err
+	}
+
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+
+	if err = os.Rename(tmp.Name(), filename); err != nil {
+		// The target can't be replaced (e.g. a file bind-mounted into a
+		// container): fall back to writing it in place.
+		os.Remove(tmp.Name())
+		return os.WriteFile(filename, data, perm)
 	}
 
 	return nil
 }
 
 func loadJSONFileToMap(file string) (tmpMap map[string]interface{}, err error) {
-	f, err := os.Open(getPlatformFile(file))
-	defer f.Close()
 
-	content, err := io.ReadAll(f)
-
-	if err == nil {
-		err = json.Unmarshal([]byte(content), &tmpMap)
+	content, err := os.ReadFile(getPlatformFile(file))
+	if err != nil {
+		return
 	}
 
-	f.Close()
+	err = json.Unmarshal(content, &tmpMap)
 
 	return
 }
@@ -297,21 +329,12 @@ func loadJSONFileToMap(file string) (tmpMap map[string]interface{}, err error) {
 // Binary
 func readByteFromFile(file string) (content []byte, err error) {
 
-	f, err := os.Open(getPlatformFile(file))
-	defer f.Close()
-
-	content, err = io.ReadAll(f)
-	f.Close()
-
-	return
+	return os.ReadFile(getPlatformFile(file))
 }
 
 func writeByteToFile(file string, data []byte) (err error) {
 
-	var filename = getPlatformFile(file)
-	err = os.WriteFile(filename, data, 0644)
-
-	return
+	return writeFileAtomic(getPlatformFile(file), data, 0644)
 }
 
 func readStringFromFile(file string) (str string, err error) {
