@@ -61,6 +61,10 @@ class Server {
 
     ws.onmessage = function (e) {
 
+      // The server answers each request with a single message; close the
+      // socket so neither side keeps it open.
+      this.close()
+
       SERVER_CONNECTION = false
       showElement("loading", false)
 

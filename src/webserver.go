@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"threadfin/src/internal/authentication"
 
@@ -374,6 +375,11 @@ func DataImages(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+var (
+	wsMaxMessageSize int64 = 256 << 20
+	wsReadTimeout          = 5 * time.Minute
+)
+
 // WS : Web Sockets /ws/
 func WS(w http.ResponseWriter, r *http.Request) {
 
@@ -398,6 +404,17 @@ func WS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not open websocket connection", http.StatusBadRequest)
 		return
 	}
+
+	// The upgraded connection is no longer managed by the HTTP server: close
+	// it on every return, or the socket stays open until a GC finalizer
+	// happens to run (the web UI opens one per request, every 10 seconds).
+	defer conn.Close()
+
+	// A request is a single JSON message, read before the token is checked.
+	// Bound its size (the largest legitimate one is a backup uploaded for
+	// restore) and don't hold the socket for a client that never sends.
+	conn.SetReadLimit(wsMaxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 
 	systemMutex.Lock()
 	if Settings.HttpThreadfinDomain != "" {
