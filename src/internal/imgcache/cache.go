@@ -9,6 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+)
+
+// Limits for downloading one image. Without a timeout, one image host that
+// accepted the connection and never answered stalled the whole cache.
+var (
+	downloadTimeout       = 30 * time.Second
+	maxImageSize    int64 = 32 << 20
 )
 
 // Cache : Cache strcut
@@ -18,7 +26,10 @@ type Cache struct {
 	caching  bool
 	images   map[string]string
 	Queue    []string
-	Cache    []string
+	queued   map[string]bool // the URLs in Queue
+	cached   map[string]bool // file names in the cache folder
+	busy     bool            // Caching is running
+	client   *http.Client
 	Image    imageFunc
 	sync.RWMutex
 }
@@ -39,9 +50,9 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 	c.cacheURL = cacheURL
 	c.caching = caching
 	c.Queue = []string{}
-	c.Cache = []string{}
-
-	var queue []string
+	c.queued = make(map[string]bool)
+	c.cached = make(map[string]bool)
+	c.client = &http.Client{Timeout: downloadTimeout}
 
 	c.Image.GetURL = func(src string, http_domain string, http_port string, force_https bool, https_port int, https_domain string) (cacheURL string) {
 
@@ -84,8 +95,9 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 			return cacheURL
 		}
 
-		if indexOfString(filename, c.Cache) == -1 {
-			if indexOfString(src, c.Queue) == -1 {
+		if !c.cached[filename] {
+			if !c.queued[src] {
+				c.queued[src] = true
 				c.Queue = append(c.Queue, src)
 			}
 
@@ -97,51 +109,54 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 		return src
 	}
 
+	// Caching downloads the queued images. The downloads run without
+	// holding the lock, so GetURL (used while building the M3U and XMLTV
+	// files) is never blocked by a slow image host.
 	c.Image.Caching = func() {
 
 		c.Lock()
-		defer c.Unlock()
+		if c.busy {
+			c.Unlock()
+			return
+		}
+		c.busy = true
+		var queue = append([]string(nil), c.Queue...)
+		c.Unlock()
 
-		var filename string
-
-		for _, src := range c.Queue {
-
-			resp, err := http.Get(src)
-			if err != nil {
-				continue
+		defer func() {
+			c.Lock()
+			// Keep what is still queued (failed downloads, and images
+			// queued by GetURL in the meantime).
+			var remaining = c.Queue[:0]
+			for _, src := range c.Queue {
+				if c.queued[src] {
+					remaining = append(remaining, src)
+				}
 			}
-			defer resp.Body.Close()
+			c.Queue = remaining
+			c.busy = false
+			c.Unlock()
+		}()
 
-			if resp.StatusCode != http.StatusOK {
-				continue
-			}
+		for _, src := range queue {
 
 			src_filtered := strings.Split(src, "?")
-			filename = fmt.Sprintf("%s%s%s", c.path, strToMD5(src_filtered[0]), filepath.Ext(src_filtered[0]))
-
-			file, err := os.Create(filename)
-			if err != nil {
-				continue
-			}
-
-			defer file.Close()
-
-			_, err = io.Copy(file, resp.Body)
-			if err != nil {
-				continue
-			}
-
 			u, err := url.Parse(src_filtered[0])
-			if err == nil {
-				c.images[fmt.Sprintf("%s%s", strToMD5(src_filtered[0]), filepath.Ext(u.Path))] = c.cacheURL + filename
+			if err != nil {
+				continue
 			}
 
-			queue = append(queue, src_filtered[0])
+			var name = fmt.Sprintf("%s%s", strToMD5(src_filtered[0]), filepath.Ext(u.Path))
 
-		}
+			if err := c.download(src, c.path+name); err != nil {
+				continue
+			}
 
-		for _, q := range queue {
-			c.Queue = removeStringFromSlice(q, c.Queue)
+			c.Lock()
+			c.cached[name] = true
+			c.images[name] = c.cacheURL + name
+			delete(c.queued, src)
+			c.Unlock()
 		}
 
 	}
@@ -150,6 +165,11 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 
 		c.Lock()
 		defer c.Unlock()
+
+		// Images are being downloaded: they aren't in c.images yet.
+		if c.busy {
+			return
+		}
 
 		files, err := os.ReadDir(c.path)
 		if err != nil {
@@ -179,8 +199,43 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 	}
 
 	for _, file := range files {
-		c.Cache = append(c.Cache, file.Name())
+		c.cached[file.Name()] = true
 	}
 
 	return
+}
+
+// download saves the image at src to filename. It is written to a
+// temporary file first, so a failed download never leaves a partial image
+// in the cache.
+func (c *Cache) download(src, filename string) (err error) {
+
+	resp, err := c.client.Get(src)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", src, resp.Status)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(filename), ".download-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op after the rename
+
+	n, err := io.Copy(tmp, io.LimitReader(resp.Body, maxImageSize+1))
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if n > maxImageSize {
+		return fmt.Errorf("%s: image larger than %d bytes", src, maxImageSize)
+	}
+
+	return os.Rename(tmp.Name(), filename)
 }
