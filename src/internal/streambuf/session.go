@@ -62,6 +62,14 @@ type Config struct {
 	HealthyAfter time.Duration
 	RetryBackoff time.Duration
 
+	// A channel without backups whose source drops after it streamed
+	// healthily gets this many more attempts before its viewers are
+	// released, with the pause growing by RetryBackoff each time (an
+	// upstream that is unreachable for a few seconds does not end the
+	// channel). A channel that never started still fails at once, and
+	// channels with backups switch to them as before.
+	LoneSourceRetries int
+
 	// How long the stream keeps running after its last viewer leaves.
 	// Clients such as Plex probe a stream and reconnect right away; the
 	// second request then reuses the running stream instead of tuning
@@ -86,19 +94,20 @@ type Config struct {
 // DefaultConfig returns the recommended settings.
 func DefaultConfig() Config {
 	return Config{
-		Prebuffer:        1 << 20,
-		PrebufferMaxWait: 3 * time.Second,
-		Retention:        15 * time.Second,
-		MaxBufferBytes:   48 << 20,
-		StartTimeout:     20 * time.Second,
-		StallTimeout:     15 * time.Second,
-		HealthyAfter:     10 * time.Second,
-		RetryBackoff:     500 * time.Millisecond,
-		Linger:           5 * time.Second,
-		TunerWait:        2 * time.Second,
-		ReadSize:         64 << 10,
-		CoalesceBytes:    64 << 10,
-		CoalesceDelay:    100 * time.Millisecond,
+		Prebuffer:         1 << 20,
+		PrebufferMaxWait:  3 * time.Second,
+		Retention:         15 * time.Second,
+		MaxBufferBytes:    48 << 20,
+		StartTimeout:      20 * time.Second,
+		StallTimeout:      15 * time.Second,
+		HealthyAfter:      10 * time.Second,
+		RetryBackoff:      500 * time.Millisecond,
+		LoneSourceRetries: 3, // pauses of 0.5, 1, 1.5 and 2 s
+		Linger:            5 * time.Second,
+		TunerWait:         2 * time.Second,
+		ReadSize:          64 << 10,
+		CoalesceBytes:     64 << 10,
+		CoalesceDelay:     100 * time.Millisecond,
 	}
 }
 
@@ -184,9 +193,9 @@ type Manager struct {
 // NewManager creates an empty manager.
 func NewManager(log Logger) *Manager {
 	return &Manager{
-		log:      log,
-		sessions: map[string]*session{},
-		tuners:   map[string]int{},
+		log:         log,
+		sessions:    map[string]*session{},
+		tuners:      map[string]int{},
 		tunerChange: make(chan struct{}),
 	}
 }
@@ -486,6 +495,12 @@ func (s *session) run() {
 		if streamed >= cfg.HealthyAfter {
 			// It worked for a while: most likely a hiccup. Reconnect at once.
 			failures = 0
+			if len(sources) == 1 {
+				// Nothing to fail over to: if the upstream is gone for a
+				// moment, viewers are better served by a few more attempts
+				// than by being dropped after the second one.
+				maxFailures = 2 + cfg.LoneSourceRetries
+			}
 			s.m.log.info("Streaming Status:Channel: %s - %s dropped after %v (%v), reconnecting", s.req.Channel, src.Label, streamed.Round(time.Second), err)
 			continue
 		}

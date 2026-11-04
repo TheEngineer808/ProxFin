@@ -306,6 +306,110 @@ func TestEveryBackupIsTriedThenViewersAreReleased(t *testing.T) {
 	}
 }
 
+// plannedLauncher starts the i-th planned behaviour on the i-th launch
+// (the last one repeats): one source whose upstream changes over time.
+type plannedLauncher struct {
+	mu       sync.Mutex
+	plan     []behaviour
+	launches int
+}
+
+func (l *plannedLauncher) launch(Source) (Process, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.plan[len(l.plan)-1]
+	if l.launches < len(l.plan) {
+		b = l.plan[l.launches]
+	}
+	l.launches++
+	return startFake(b), nil
+}
+
+func (l *plannedLauncher) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.launches
+}
+
+var refused = behaviour{failNow: true, exitErr: errors.New("connection refused")}
+
+// A channel without backups that was streaming survives its upstream
+// being unreachable for a moment (it used to release its viewers after
+// the second failed attempt, about 0.5 s into the outage).
+func TestLoneSourceSurvivesShortOutage(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{
+		{runFor: 2 * cfg.HealthyAfter}, // streams healthily, then the upstream goes away
+		refused, refused, refused,      // still away
+		{}, // back
+	}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	if _, err := readFor(t, v, 3*cfg.HealthyAfter); err != nil {
+		t.Fatalf("viewer released during a short outage: %v (after %d launches)", err, l.count())
+	}
+	if n := l.count(); n != 5 {
+		t.Fatalf("%d launches, want the source back on the 5th", n)
+	}
+	if data, err := readFor(t, v, 200*time.Millisecond); err != nil || len(data) == 0 {
+		t.Fatalf("no data after the upstream came back (%d bytes, %v)", len(data), err)
+	}
+}
+
+// ... but not forever: if the upstream stays away, its viewers are
+// released after a bounded number of attempts.
+func TestLoneSourceOutageIsBounded(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{{runFor: 2 * cfg.HealthyAfter}, refused}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		if _, err := v.Next(ctx); err != nil {
+			if !errors.Is(err, ErrStreamFailed) {
+				t.Fatalf("Next = %v, want ErrStreamFailed", err)
+			}
+			break
+		}
+	}
+	if n, want := l.count(), 1+2+cfg.LoneSourceRetries; n != want {
+		t.Fatalf("%d launches, want %d", n, want)
+	}
+}
+
+// A channel that never started is not retried longer: the client gets
+// its error (a 503) at once.
+func TestLoneSourceThatNeverStartedFailsFast(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{refused}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := v.WaitReady(ctx); !errors.Is(err, ErrStreamFailed) {
+		t.Fatalf("WaitReady = %v, want ErrStreamFailed", err)
+	}
+	if n := l.count(); n != 2 {
+		t.Fatalf("%d launches, want 2", n)
+	}
+}
+
 func TestStalledSourceIsReplaced(t *testing.T) {
 	l := newFakeLauncher(map[string]behaviour{
 		"primary": {runFor: 100 * time.Millisecond, hang: true},
