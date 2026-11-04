@@ -425,3 +425,51 @@ func TestBufferRealFFmpegJoinerStartsCleanly(t *testing.T) {
 		t.Errorf("joiner received %d bytes in 3 s, want at least the %d KB cushion", joiner.bytes, Settings.BufferSize)
 	}
 }
+
+// ---- HEAD ---------------------------------------------------------------
+
+// A provider that never answers a HEAD request (common: many do not
+// support it) must not hold the client's request, a goroutine and a socket
+// forever; nor may a client that left.
+func TestStreamHEADIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ok") {
+			w.Header().Set("X-Provider", "yes")
+			return
+		}
+		select { // never answers
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer provider.Close()
+	defer close(release)
+
+	old := streamHeadTimeout
+	defer func() { streamHeadTimeout = old }()
+
+	head := func(ctx context.Context, path string) (*httptest.ResponseRecorder, time.Duration) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, "/stream/x", nil).WithContext(ctx)
+		start := time.Now()
+		streamHEAD(rec, req, provider.URL+path)
+		return rec, time.Since(start)
+	}
+
+	streamHeadTimeout = 300 * time.Millisecond
+	if rec, d := head(context.Background(), "/silent"); d > 2*time.Second || rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("silent provider: answered %d after %v, want 405 after the timeout", rec.Code, d)
+	}
+
+	streamHeadTimeout = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // the client leaves
+	defer cancel()
+	if _, d := head(ctx, "/silent"); d > 2*time.Second {
+		t.Errorf("request went on for %v after the client left", d)
+	}
+
+	if rec, _ := head(context.Background(), "/ok"); rec.Code != http.StatusOK || rec.Header().Get("X-Provider") != "yes" {
+		t.Errorf("provider headers not passed on: %d %v", rec.Code, rec.Header())
+	}
+}

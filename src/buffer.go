@@ -237,6 +237,43 @@ func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// How long a HEAD request for a stream waits for the provider.
+var streamHeadTimeout = 10 * time.Second
+
+var streamHeadClient = &http.Client{}
+
+// streamHEAD answers a HEAD request for a stream with the headers of the
+// provider's answer to the same request. Providers that do not support
+// HEAD often never answer it, so the request is bounded by
+// streamHeadTimeout and ends when the client leaves (it used to hold the
+// connection, a goroutine and a socket to the provider forever).
+func streamHEAD(w http.ResponseWriter, r *http.Request, url string) {
+	ctx, cancel := context.WithTimeout(r.Context(), streamHeadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		ShowError(err, 1501)
+		httpStatusError(w, r, 405)
+		return
+	}
+	resp, err := streamHeadClient.Do(req)
+	if err != nil {
+		if r.Context().Err() == nil { // not just the client leaving
+			ShowError(err, 1502)
+			httpStatusError(w, r, 405)
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+}
+
 // sendTunerLimitVideo plays the "tuner limit reached" clip for 30 seconds.
 func sendTunerLimitVideo(w http.ResponseWriter, r *http.Request) {
 	value, ok := webUI["html/video/stream-limit.ts"]
