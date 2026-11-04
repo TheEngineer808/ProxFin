@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"threadfin/src"
 )
@@ -216,6 +218,17 @@ func main() {
 		src.ShowError(err, 0)
 		os.Exit(1)
 	}
+
+	// On Ctrl+C or a service stop (SIGTERM), stop the streams before
+	// exiting: their FFmpeg/VLC processes run in their own process groups
+	// and would otherwise keep running.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-quit
+		src.Shutdown()
+		os.Exit(0)
+	}()
 
 	err = src.StartWebserver()
 	if err != nil {

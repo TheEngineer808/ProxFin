@@ -83,6 +83,8 @@ func playlistType(playlistID string) string {
 func playlistBuffer(playlistID string) string {
 	systemMutex.Lock()
 	defer systemMutex.Unlock()
+	providerMutex.RLock()
+	defer providerMutex.RUnlock()
 
 	p := Settings.Files.M3U[playlistID]
 	if p == nil {
@@ -351,6 +353,7 @@ func getTuner(id, playlistType string) (tuner int) {
 
 	var playListBuffer string
 	systemMutex.Lock()
+	providerMutex.RLock()
 	playListInterface := Settings.Files.M3U[id]
 	if playListInterface == nil {
 		playListInterface = Settings.Files.HDHR[id]
@@ -362,6 +365,7 @@ func getTuner(id, playlistType string) (tuner int) {
 			playListBuffer = "-"
 		}
 	}
+	providerMutex.RUnlock()
 	systemMutex.Unlock()
 
 	switch playListBuffer {
