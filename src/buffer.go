@@ -1,6 +1,6 @@
 package src
 
-// Stream buffer: connects Threadfin's /stream/ requests to the stream
+// Stream buffer: connects ProxFin's /stream/ requests to the stream
 // buffer in src/internal/streambuf, which runs one ffmpeg/VLC process per
 // channel and shares it between all viewers of that channel.
 
@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"threadfin/src/internal/streambuf"
+	"proxfin/src/internal/streambuf"
 )
 
 // BackupStream is a backup URL for a channel, possibly on another playlist.

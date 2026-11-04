@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"threadfin/src/internal/authentication"
+	"proxfin/src/internal/authentication"
 
 	"github.com/gorilla/websocket"
 )
@@ -31,8 +31,8 @@ func StartWebserver() (err error) {
 
 	http.HandleFunc("/", Index)
 	http.HandleFunc("/stream/", Stream)
-	http.HandleFunc("/xmltv/", Threadfin)
-	http.HandleFunc("/m3u/", Threadfin)
+	http.HandleFunc("/xmltv/", PlaylistAndGuide)
+	http.HandleFunc("/m3u/", PlaylistAndGuide)
 	http.HandleFunc("/data/", WS)
 	http.HandleFunc("/web/", Web)
 	http.HandleFunc("/download/", Download)
@@ -49,9 +49,9 @@ func StartWebserver() (err error) {
 	case 0:
 		showHighlight(fmt.Sprintf("Web Interface:%s://%s:%s/web/", System.ServerProtocol.WEB, ipAddress, Settings.Port))
 	case 1:
-		showHighlight(fmt.Sprintf("Web Interface:%s://%s:%s/web/ | Threadfin is also available via the other %d IP.", System.ServerProtocol.WEB, ipAddress, Settings.Port, ips))
+		showHighlight(fmt.Sprintf("Web Interface:%s://%s:%s/web/ | %s is also available via the other %d IP.", System.ServerProtocol.WEB, ipAddress, Settings.Port, System.Name, ips))
 	default:
-		showHighlight(fmt.Sprintf("Web Interface:%s://%s:%s/web/ | Threadfin is also available via the other %d IP's.", System.ServerProtocol.WEB, ipAddress, Settings.Port, len(System.IPAddressesV4)+len(System.IPAddressesV6)-1))
+		showHighlight(fmt.Sprintf("Web Interface:%s://%s:%s/web/ | %s is also available via the other %d IP's.", System.ServerProtocol.WEB, ipAddress, Settings.Port, System.Name, len(System.IPAddressesV4)+len(System.IPAddressesV6)-1))
 	}
 	systemMutex.Unlock()
 
@@ -220,7 +220,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.Redirect(w, r, streamInfo.URL, 302)
 		showInfo("Streaming Info:URL was passed to the client.")
-		showInfo("Streaming Info:Threadfin is no longer involved, the client connects directly to the streaming server.")
+		showInfo("Streaming Info:" + System.Name + " is no longer involved, the client connects directly to the streaming server.")
 	default:
 		bufferingStream(streamInfo.PlaylistID, streamInfo.URL, streamInfo.BackupChannel1, streamInfo.BackupChannel2, streamInfo.BackupChannel3, streamInfo.Name, w, r)
 	}
@@ -234,8 +234,10 @@ func Auto(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-// Threadfin : Web Server /xmltv/ und /m3u/
-func Threadfin(w http.ResponseWriter, r *http.Request) {
+// PlaylistAndGuide : the playlist (/m3u/) and guide (/xmltv/). The files
+// are also served under Threadfin's names (threadfin.m3u, threadfin.xml)
+// for DVR clients set up with them.
+func PlaylistAndGuide(w http.ResponseWriter, r *http.Request) {
 
 	var requestType, groupTitle, file, content, contentType string
 	var err error
@@ -263,7 +265,7 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		systemMutex.Lock()
-		file = System.Folder.Data + getFilenameFromPath(path)
+		file = existingDataFile(getFilenameFromPath(path))
 		systemMutex.Unlock()
 
 		// Stream the file instead of reading it into memory: guides are
@@ -309,7 +311,7 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		groupTitle = r.URL.Query().Get("group-title")
 
 		systemMutex.Lock()
-		m3uFilePath := System.Folder.Data + "threadfin.m3u"
+		m3uFilePath := existingDataFile(System.AppName + ".m3u")
 		systemMutex.Unlock()
 
 		// Without a group filter the whole playlist is served from the file
@@ -659,12 +661,12 @@ func WS(w http.ResponseWriter, r *http.Request) {
 
 				if err == nil {
 					if len(newWebURL) > 0 {
-						response.Alert = "Backup was successfully restored.\nThe port of the sTeVe URL has changed, you have to restart Threadfin.\nAfter a restart, Threadfin can be reached again at the following URL:\n" + newWebURL
+						response.Alert = "Backup was successfully restored.\nThe port of the web interface has changed, you have to restart " + System.Name + ".\nAfter a restart, " + System.Name + " can be reached again at the following URL:\n" + newWebURL
 					} else {
 						response.Alert = "Backup was successfully restored."
 						response.Reload = true
 					}
-					showInfo("Threadfin:" + "Backup successfully restored.")
+					showInfo(System.Name + ":" + "Backup successfully restored.")
 				}
 			}
 
@@ -784,7 +786,7 @@ func Web(w http.ResponseWriter, r *http.Request) {
 			var username, password, confirm string
 			switch r.Method {
 			case "POST":
-				// Logins and the first user must come from Threadfin's own
+				// Logins and the first user must come from ProxFin's own
 				// pages, not from a form on another website.
 				if refuseCrossSite(w, r) {
 					return
@@ -958,8 +960,8 @@ func API(w http.ResponseWriter, r *http.Request) {
 			  "streams.xepg": 2,
 			  "token": "mXiG1NE1MrTXDtyh7PxRHK5z8iPI_LzxsQmY-LFn",
 			  "url.dvr": "localhost:34400",
-			  "url.m3u": "http://localhost:34400/m3u/threadfin.m3u",
-			  "url.xepg": "http://localhost:34400/xmltv/threadfin.xml",
+			  "url.m3u": "http://localhost:34400/m3u/proxfin.m3u",
+			  "url.xepg": "http://localhost:34400/xmltv/proxfin.xml",
 			  "version.api": "1.1.0",
 			  "version.threadfin": "1.3.0"
 			}
@@ -1072,8 +1074,8 @@ func API(w http.ResponseWriter, r *http.Request) {
 		response.StreamsXepg = int64(Data.XEPG.XEPGCount)
 		response.EpgSource = Settings.EpgSource
 		response.URLDvr = System.Domain
-		response.URLM3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/threadfin.m3u"
-		response.URLXepg = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/threadfin.xml"
+		response.URLM3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/" + System.AppName + ".m3u"
+		response.URLXepg = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/" + System.AppName + ".xml"
 
 	case "update.m3u":
 		err = getProviderData("m3u", "")

@@ -1,6 +1,6 @@
 package src
 
-import "threadfin/src/internal/imgcache"
+import "proxfin/src/internal/imgcache"
 
 // SystemStruct : Beinhaltet alle Systeminformationen
 type SystemStruct struct {

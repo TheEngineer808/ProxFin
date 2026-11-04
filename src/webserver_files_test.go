@@ -27,7 +27,7 @@ func get(t *testing.T, path string, header http.Header) *http.Response {
 		req.Header[k] = v
 	}
 	rec := httptest.NewRecorder()
-	Threadfin(rec, req)
+	PlaylistAndGuide(rec, req)
 	return rec.Result()
 }
 

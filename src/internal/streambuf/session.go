@@ -1,4 +1,4 @@
-// Package streambuf is Threadfin's stream buffer: one upstream connection
+// Package streambuf is ProxFin's stream buffer: one upstream connection
 // (an ffmpeg or VLC process) per channel, shared by every viewer of that
 // channel through an in-memory buffer.
 //
@@ -306,7 +306,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 // processes it started), and waits up to timeout for them to exit; it
 // returns ErrShutdownTimeout if some were still running then. Viewers get
 // ErrStopped, and Joins after Shutdown (including those waiting for a
-// tuner) fail with ErrShutdown. Call it before Threadfin exits: the
+// tuner) fail with ErrShutdown. Call it before ProxFin exits: the
 // processes run in their own process groups, so they would otherwise
 // outlive it and keep holding the providers' connections.
 func (m *Manager) Shutdown(timeout time.Duration) error {

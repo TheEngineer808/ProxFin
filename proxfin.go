@@ -1,7 +1,9 @@
 // Copyright 2019 marmei. All rights reserved.
 // Use of this source code is governed by a MIT license that can be found in the
 // LICENSE file.
-// GitHub: https://github.com/Threadfin/Threadfin
+// GitHub: https://github.com/TheEngineer808/ProxFin
+// Based on Threadfin (https://github.com/Threadfin/Threadfin), which is based
+// on xTeVe (https://github.com/xteve-project/xTeVe).
 
 package main
 
@@ -17,7 +19,7 @@ import (
 	"strings"
 	"syscall"
 
-	"threadfin/src"
+	"proxfin/src"
 )
 
 // GitHubStruct : GitHub Account. Über diesen Account werden die Updates veröffentlicht
@@ -30,13 +32,12 @@ type GitHubStruct struct {
 }
 
 // GitHub : GitHub Account
-// If you want to fork this project, enter your Github account here. This prevents a newer version of Threadfin from updating your version.
+// The repository automatic updates download releases from. If you fork this
+// project, enter your own repository here, or a newer release of this one
+// would replace your build.
 //
-// Automatic updates are off: they download releases from this repository,
-// which is still upstream Threadfin, and a newer upstream release would
-// replace this build. Point User/Repo at this project's own repository
-// (which must publish releases) before turning them back on.
-var GitHub = GitHubStruct{Branch: "Main", User: "Threadfin", Repo: "Threadfin", Update: false}
+// Automatic updates stay off until this repository publishes releases.
+var GitHub = GitHubStruct{Branch: "Main", User: "TheEngineer808", Repo: "ProxFin", Update: false}
 
 /*
 	Branch: GitHub Branch
@@ -46,7 +47,7 @@ var GitHub = GitHubStruct{Branch: "Main", User: "Threadfin", Repo: "Threadfin", 
 */
 
 // Name : Programmname
-const Name = "Threadfin"
+const Name = "ProxFin"
 
 // Version : Version, die Build Nummer wird in der main func geparst.
 const Version = "1.2.40"
@@ -58,12 +59,12 @@ const DBVersion = "0.5.0"
 const APIVersion = "1.2.40"
 
 var homeDirectory = fmt.Sprintf("%s%s.%s%s", src.GetUserHomeDirectory(), string(os.PathSeparator), strings.ToLower(Name), string(os.PathSeparator))
-var samplePath = fmt.Sprintf("%spath%sto%sthreadfin%s", string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator))
+var samplePath = fmt.Sprintf("%spath%sto%sproxfin%s", string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator))
 var sampleRestore = fmt.Sprintf("%spath%sto%sfile%s", string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator), string(os.PathSeparator))
 
 var configFolder = flag.String("config", "", ": Config Folder        ["+samplePath+"] (default: "+homeDirectory+")")
 var port = flag.String("port", "", ": Server port          [34400] (default: 34400)")
-var restore = flag.String("restore", "", ": Restore from backup  ["+sampleRestore+"threadfin_backup.zip]")
+var restore = flag.String("restore", "", ": Restore from backup  ["+sampleRestore+"proxfin_backup.zip]")
 
 var gitBranch = flag.String("branch", "", ": Git Branch           [main|beta] (default: main)")
 var debug = flag.Int("debug", 0, ": Debug level          [0 - 3] (default: 0)")
@@ -122,7 +123,7 @@ func main() {
 			fmt.Println("* * * * * * * * * * * * * * * *")
 
 			// A non-zero exit code lets a supervisor (systemd, Docker
-			// restart policies) restart Threadfin.
+			// restart policies) restart ProxFin.
 			os.Exit(1)
 
 		}

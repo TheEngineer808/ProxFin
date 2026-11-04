@@ -11,10 +11,13 @@ import (
 func setupM3UChannels(t testing.TB, n int) {
 	dir := usePipelineFolders(t)
 	useSettings(t, dir)
-	savedProtocol, savedDomain, savedGroups := System.ServerProtocol, System.Domain, Data.Playlist.M3U.Groups.Text
+	savedProtocol, savedDomain, savedGroups, savedName := System.ServerProtocol, System.Domain, Data.Playlist.M3U.Groups.Text, System.AppName
 	t.Cleanup(func() {
-		System.ServerProtocol, System.Domain, Data.Playlist.M3U.Groups.Text = savedProtocol, savedDomain, savedGroups
+		System.ServerProtocol, System.Domain, Data.Playlist.M3U.Groups.Text, System.AppName = savedProtocol, savedDomain, savedGroups, savedName
 	})
+	// The legacy copy names the guide threadfin.xml in the playlist header;
+	// these tests compare the algorithm, so use the same name.
+	System.AppName = legacyAppName
 	System.ServerProtocol.M3U, System.ServerProtocol.XML, System.Domain = "http", "http", "threadfin.local:34400"
 
 	Data.XEPG.Channels = map[string]interface{}{}

@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"threadfin/src/internal/streambuf"
+	"proxfin/src/internal/streambuf"
 )
 
 // Log lines from a process shown in the normal log before debug level only.

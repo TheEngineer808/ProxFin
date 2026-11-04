@@ -1,4 +1,4 @@
-module threadfin
+module proxfin
 
 go 1.22
 

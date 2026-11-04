@@ -21,7 +21,7 @@ import (
 	"unicode"
 
 	"bufio"
-	"threadfin/src/internal/imgcache"
+	"proxfin/src/internal/imgcache"
 	_ "time/tzdata"
 )
 
@@ -398,7 +398,7 @@ func createXEPGMapping() {
 
 	}
 
-	Data.XMLTV.Mapping["Threadfin Dummy"] = dummy
+	Data.XMLTV.Mapping[dummyXMLTVFile] = dummy
 
 	return
 }
@@ -417,6 +417,8 @@ func createXEPGDatabase() (err error) {
 
 	Data.Cache.Streams.Active = make([]string, 0, System.UnfilteredChannelLimit)
 	Data.XEPG.Channels, err = loadJSONFileToMap(System.File.XEPG)
+	// Channels mapped to the dummy guide by Threadfin use its old name.
+	migrateLegacyDummy(Data.XEPG.Channels)
 	if err != nil {
 		ShowError(err, 1004)
 		return err
@@ -639,7 +641,7 @@ func createXEPGDatabase() (err error) {
 			if m3uChannel.LiveEvent == "true" && xepgChannel.Live {
 				if hasFewPrograms(xepgChannel) {
 					showInfo(fmt.Sprintf("XEPG: Updating Live Event channel to use Live EPG: %s", xepgChannel.XName))
-					xepgChannel.XmltvFile = "Threadfin Dummy"
+					xepgChannel.XmltvFile = dummyXMLTVFile
 					xepgChannel.XMapping = "PPV"
 				}
 			}
@@ -749,7 +751,7 @@ func createXEPGDatabase() (err error) {
 			}
 
 			if newChannel.Live && hasFewPrograms(newChannel) {
-				newChannel.XmltvFile = "Threadfin Dummy"
+				newChannel.XmltvFile = dummyXMLTVFile
 				newChannel.XMapping = "PPV"
 				newChannel.XActive = true
 				showInfo(fmt.Sprintf("XEPG:New live channel created (active): %s (%s)", newChannel.Name, newChannel.XGroupTitle))
@@ -957,7 +959,7 @@ func mapping() (err error) {
 			var mapping = xepgChannel.XMapping
 			var file = xepgChannel.XmltvFile
 
-			if file != "Threadfin Dummy" && !xepgChannel.Live {
+			if !isDummyXMLTVFile(file) && !xepgChannel.Live {
 
 				if value, ok := Data.XMLTV.Mapping[file].(map[string]interface{}); ok {
 
@@ -1265,7 +1267,7 @@ func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 
 	var programs []*Program
 
-	if strings.Contains(xmltvFile, "Threadfin Dummy") {
+	if strings.Contains(xmltvFile, dummyXMLTVFile) || strings.Contains(xmltvFile, legacyDummyXMLTVFile) {
 		programs = createDummyProgram(xepgChannel).Program
 	} else {
 		if xepgChannel.XmltvFile != "" {
@@ -1603,7 +1605,7 @@ func createDummyProgram(xepgChannel XEPGChannelStruct) (dummyXMLTV XMLTV) {
 			epg.Title = append(epg.Title, &Title{Value: titleValue, Lang: "en"})
 
 			if len(xepgChannel.XDescription) == 0 {
-				var descValue = "Threadfin: (" + strconv.Itoa(dummyLength) + " Minutes) " + epgStartTime.Weekday().String() + " " + epgStartTime.Format("15:04") + " - " + epgStopTime.Format("15:04")
+				var descValue = System.Name + ": (" + strconv.Itoa(dummyLength) + " Minutes) " + epgStartTime.Weekday().String() + " " + epgStartTime.Format("15:04") + " - " + epgStopTime.Format("15:04")
 				if !Settings.EnableNonAscii {
 					descValue = strings.TrimSpace(strings.Map(func(r rune) rune {
 						if r > unicode.MaxASCII {

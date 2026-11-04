@@ -85,7 +85,8 @@ func getDiscover() (jsonContent []byte, err error) {
 	var discover Discover
 
 	discover.BaseURL = System.ServerProtocol.WEB + "://" + System.Domain
-	discover.DeviceAuth = System.AppName
+	// Kept from Threadfin: DVR clients already set up know the tuner by it.
+	discover.DeviceAuth = legacyAppName
 	discover.DeviceID = System.DeviceID
 	discover.FirmwareName = "bin_" + System.Version
 	discover.FirmwareVersion = System.Version

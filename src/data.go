@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"threadfin/src/internal/authentication"
-	"threadfin/src/internal/imgcache"
+	"proxfin/src/internal/authentication"
+	"proxfin/src/internal/imgcache"
 )
 
 // Einstellungen ändern (WebUI)
@@ -521,6 +521,10 @@ func saveFilter(request RequestStruct) (settings SettingsStruct, err error) {
 
 // XEPG Mapping speichern
 func saveXEpgMapping(request RequestStruct) (err error) {
+
+	// A page loaded before the database was converted may still send
+	// Threadfin's name of the dummy guide.
+	migrateLegacyDummy(request.EpgMapping)
 
 	var tmp = Data.XEPG
 
