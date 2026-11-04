@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -116,7 +117,7 @@ func buildXEPG(background bool) {
 				systemMutex.Unlock()
 
 				// Cache löschen
-				Data.Cache.XMLTV = make(map[string]XMLTV)
+				clearXMLTVCache()
 				runtime.GC()
 
 			}()
@@ -163,7 +164,7 @@ func buildXEPG(background bool) {
 				showInfo("XEPG:" + fmt.Sprintf("Ready to use"))
 
 				// Cache löschen
-				Data.Cache.XMLTV = make(map[string]XMLTV)
+				clearXMLTVCache()
 				runtime.GC()
 
 			}()
@@ -221,7 +222,7 @@ func updateXEPG(background bool) {
 	}
 
 	// Cache löschen
-	Data.Cache.XMLTV = make(map[string]XMLTV)
+	clearXMLTVCache()
 
 	return
 }
@@ -592,8 +593,7 @@ func createXEPGDatabase() (err error) {
 
 			// Update channel name - for Live Events, allow name updates even without UUID
 			if channelHasUUID {
-				programData, _ := getProgramData(xepgChannel)
-				if xepgChannel.XUpdateChannelName || strings.Contains(xepgChannel.TvgID, "threadfin-") || (m3uChannel.LiveEvent == "true" && len(programData.Program) <= 3) {
+				if xepgChannel.XUpdateChannelName || strings.Contains(xepgChannel.TvgID, "threadfin-") || (m3uChannel.LiveEvent == "true" && hasFewPrograms(xepgChannel)) {
 					xepgChannel.XName = m3uChannel.Name
 					xepgChannel.TvgName = m3uChannel.TvgName // Also update TvgName for Live Events
 				}
@@ -605,8 +605,7 @@ func createXEPGDatabase() (err error) {
 
 			// For Live Event channels, ensure they use Live Event EPG if they have insufficient program data
 			if m3uChannel.LiveEvent == "true" && xepgChannel.Live {
-				programData, _ := getProgramData(xepgChannel)
-				if len(programData.Program) <= 3 {
+				if hasFewPrograms(xepgChannel) {
 					showInfo(fmt.Sprintf("XEPG: Updating Live Event channel to use Live EPG: %s", xepgChannel.XName))
 					xepgChannel.XmltvFile = "Threadfin Dummy"
 					xepgChannel.XMapping = "PPV"
@@ -717,9 +716,7 @@ func createXEPGDatabase() (err error) {
 
 			}
 
-			programData, _ := getProgramData(newChannel)
-
-			if newChannel.Live && len(programData.Program) <= 3 {
+			if newChannel.Live && hasFewPrograms(newChannel) {
 				newChannel.XmltvFile = "Threadfin Dummy"
 				newChannel.XMapping = "PPV"
 				newChannel.XActive = true
@@ -1115,25 +1112,80 @@ func createXMLTVFile() (err error) {
 	return
 }
 
+// clearXMLTVCache drops the parsed XMLTV files and their programme index.
+func clearXMLTVCache() {
+	Data.Cache.XMLTV = make(map[string]XMLTV)
+
+	programIndexMu.Lock()
+	programIndex = make(map[string]*xmltvProgramIndex)
+	programIndexMu.Unlock()
+}
+
+// The programmes of each XMLTV file in Data.Cache.XMLTV, by channel.
+// getProgramData used to scan every programme of the file for every
+// channel. An index is rebuilt when the cached file it was built from has
+// been replaced (Data.Cache.XMLTV is also changed outside this file).
+var (
+	programIndexMu sync.Mutex
+	programIndex   = make(map[string]*xmltvProgramIndex)
+)
+
+type xmltvProgramIndex struct {
+	programs  []*Program // what the index was built from
+	byChannel map[string][]*Program
+}
+
+// channelPrograms returns the programmes of xmltv (the cached content of
+// file) for the channel, in file order.
+func channelPrograms(file string, xmltv *XMLTV, channelID string) []*Program {
+
+	programIndexMu.Lock()
+	defer programIndexMu.Unlock()
+
+	idx, ok := programIndex[file]
+	if !ok || !sameProgramSlice(idx.programs, xmltv.Program) {
+		idx = &xmltvProgramIndex{programs: xmltv.Program, byChannel: make(map[string][]*Program)}
+		for _, p := range xmltv.Program {
+			idx.byChannel[p.Channel] = append(idx.byChannel[p.Channel], p)
+		}
+		programIndex[file] = idx
+	}
+
+	return idx.byChannel[channelID]
+}
+
+func sameProgramSlice(a, b []*Program) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// hasFewPrograms reports whether the channel has at most 3 programmes (or
+// its guide can't be loaded): live event channels then use the live guide.
+func hasFewPrograms(xepgChannel XEPGChannelStruct) bool {
+	programData, _ := getProgramData(xepgChannel)
+	return len(programData.Program) <= 3
+}
+
 // Programmdaten erstellen (createXMLTVFile)
 func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 	var xmltvFile = System.Folder.Data + xepgChannel.XmltvFile
 	var channelID = xepgChannel.XMapping
 
-	var xmltv XMLTV
+	var programs []*Program
 
 	if strings.Contains(xmltvFile, "Threadfin Dummy") {
-		xmltv = createDummyProgram(xepgChannel)
+		programs = createDummyProgram(xepgChannel).Program
 	} else {
 		if xepgChannel.XmltvFile != "" {
+			var xmltv XMLTV
 			err = getLocalXMLTV(xmltvFile, &xmltv)
 			if err != nil {
 				return
 			}
+			programs = channelPrograms(xmltvFile, &xmltv, channelID)
 		}
 	}
 
-	for _, xmltvProgram := range xmltv.Program {
+	for _, xmltvProgram := range programs {
 		if xmltvProgram.Channel == channelID {
 			var program = &Program{}
 
@@ -1155,16 +1207,8 @@ func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 				program.Title = xmltvProgram.Title
 			}
 
-			filters := []FilterStruct{}
-			for _, filter := range Settings.Filter {
-				filter_json, _ := json.Marshal(filter)
-				f := FilterStruct{}
-				json.Unmarshal(filter_json, &f)
-				filters = append(filters, f)
-			}
-
 			// Category (Kategorie)
-			getCategory(program, xmltvProgram, xepgChannel, filters)
+			getCategory(program, xmltvProgram, xepgChannel)
 
 			// Sub-Title
 			program.SubTitle = xmltvProgram.SubTitle
@@ -1502,7 +1546,7 @@ func createDummyProgram(xepgChannel XEPGChannelStruct) (dummyXMLTV XMLTV) {
 }
 
 // Kategorien erweitern (createXMLTVFile)
-func getCategory(program *Program, xmltvProgram *Program, xepgChannel XEPGChannelStruct, filters []FilterStruct) {
+func getCategory(program *Program, xmltvProgram *Program, xepgChannel XEPGChannelStruct) {
 
 	for _, i := range xmltvProgram.Category {
 

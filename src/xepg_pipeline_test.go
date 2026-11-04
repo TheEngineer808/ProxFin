@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -25,6 +26,9 @@ func usePipelineFolders(t *testing.T) string {
 		System.Folder, System.File, System.Compressed.GZxml, System.Flag.Info = savedSystemFolder, savedSystemFile, savedGZ, savedInfo
 		Data.Cache.Images, Data.Cache.XMLTV = savedImages, savedXMLTVCache
 		Data.XEPG, Data.XMLTV, Data.Streams, Data.Filter = savedXEPG, savedXMLTV, savedStreams, savedFilter
+		programIndexMu.Lock()
+		programIndex = make(map[string]*xmltvProgramIndex)
+		programIndexMu.Unlock()
 	})
 
 	dir := t.TempDir()
@@ -44,7 +48,7 @@ func usePipelineFolders(t *testing.T) string {
 		t.Fatal(err)
 	}
 	Data.Cache.Images = images
-	Data.Cache.XMLTV = make(map[string]XMLTV)
+	clearXMLTVCache()
 
 	return dir
 }
@@ -175,7 +179,7 @@ func TestCreateXEPGMappingDropsMissingXMLTV(t *testing.T) {
 	}
 
 	for run := 0; run < 8; run++ {
-		Data.Cache.XMLTV = make(map[string]XMLTV)
+		clearXMLTVCache()
 		createXEPGMapping()
 
 		var names []string
@@ -192,3 +196,123 @@ func TestCreateXEPGMappingDropsMissingXMLTV(t *testing.T) {
 		}
 	}
 }
+
+// testGuide returns an XMLTV guide with programmes for several channels, in
+// interleaved order, with the fields getProgramData copies or rewrites.
+func testGuide(channels, perChannel int) XMLTV {
+	var guide XMLTV
+	for c := 0; c < channels; c++ {
+		guide.Channel = append(guide.Channel, &Channel{ID: fmt.Sprintf("ch%d.example", c), DisplayName: []DisplayName{{Value: fmt.Sprintf("Channel %d", c)}}})
+	}
+	for p := 0; p < perChannel; p++ {
+		for c := 0; c < channels; c++ {
+			prog := &Program{
+				Channel:  fmt.Sprintf("ch%d.example", c),
+				Start:    fmt.Sprintf("20261104%02d0000 +0000", p%24),
+				Stop:     fmt.Sprintf("20261104%02d3000 +0000", p%24),
+				Title:    []*Title{{Lang: "en", Value: fmt.Sprintf("Show %d – Ünïcode %d", p, c)}},
+				Desc:     []*Desc{{Lang: "en", Value: "Description"}},
+				Category: []*Category{{Lang: "en", Value: "Series"}},
+				Video:    Video{Quality: map[bool]string{true: "HDTV", false: ""}[p%2 == 0]},
+			}
+			if p%3 == 0 {
+				prog.Poster = []Poster{{Src: fmt.Sprintf("http://img.example/%d/%d.jpg", c, p)}}
+			}
+			if p%4 == 0 {
+				prog.EpisodeNum = []*EpisodeNum{{System: "xmltv_ns", Value: fmt.Sprintf("1.%d.", p)}}
+			}
+			guide.Program = append(guide.Program, prog)
+		}
+	}
+	return guide
+}
+
+// Indexing the programmes by channel must return what the scan over all
+// programmes returned, and follow the cache when a file is reloaded.
+func TestGetProgramDataMatchesLegacy(t *testing.T) {
+	dir := usePipelineFolders(t)
+	useSettings(t, dir)
+	Settings.EnableNonAscii = false
+	Settings.XepgReplaceMissingImages = true
+	Settings.Filter = map[int64]interface{}{0: map[string]interface{}{"filter": "News", "type": "group-title"}}
+
+	file := System.Folder.Data + "X1.xml"
+	Data.Cache.XMLTV[file] = testGuide(12, 30)
+
+	var channels []XEPGChannelStruct
+	for c := 0; c < 14; c++ { // ch12 and ch13 have no programmes
+		channels = append(channels, XEPGChannelStruct{
+			XmltvFile: "X1.xml", XMapping: fmt.Sprintf("ch%d.example", c), XChannelID: fmt.Sprint(100 + c),
+			XName: fmt.Sprintf("Channel %d HD", c), TvgLogo: "http://logo.example/l.png", XCategory: map[bool]string{true: "Sports", false: ""}[c%2 == 0],
+		})
+	}
+	channels = append(channels,
+		XEPGChannelStruct{XmltvFile: "Threadfin Dummy", XMapping: "60_Minutes", XChannelID: "500", XName: "Dummy"},
+		XEPGChannelStruct{XmltvFile: "", XMapping: "ch1.example"},
+		XEPGChannelStruct{XmltvFile: "missing.xml", XMapping: "ch1.example"},
+	)
+
+	compare := func(stage string) {
+		t.Helper()
+		for _, ch := range channels {
+			got, gotErr := getProgramData(ch)
+			want, wantErr := legacyGetProgramData(ch)
+			if (gotErr == nil) != (wantErr == nil) {
+				t.Fatalf("%s: %s/%s: error %v, legacy %v", stage, ch.XmltvFile, ch.XMapping, gotErr, wantErr)
+			}
+			if ch.XmltvFile == "Threadfin Dummy" { // start times depend on the clock
+				if len(got.Program) != len(want.Program) {
+					t.Fatalf("%s: dummy: %d programmes, legacy %d", stage, len(got.Program), len(want.Program))
+				}
+				continue
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: %s/%s differs from legacy:\n got  %d programmes\n want %d programmes", stage, ch.XmltvFile, ch.XMapping, len(got.Program), len(want.Program))
+			}
+		}
+	}
+
+	compare("first load")
+	if n := len(programIndex[file].byChannel["ch3.example"]); n != 30 {
+		t.Fatalf("index holds %d programmes for ch3, want 30", n)
+	}
+
+	// The file is updated and parsed again: the index must not be stale.
+	Data.Cache.XMLTV[file] = testGuide(3, 5)
+	compare("reloaded")
+	if got, _ := getProgramData(channels[1]); len(got.Program) != 5 {
+		t.Fatalf("after reload: %d programmes, want 5", len(got.Program))
+	}
+
+	clearXMLTVCache()
+	if len(programIndex) != 0 || len(Data.Cache.XMLTV) != 0 {
+		t.Fatal("clearXMLTVCache left data behind")
+	}
+}
+
+func benchmarkProgramData(b *testing.B, get func(XEPGChannelStruct) (XMLTV, error)) {
+	System.Flag.Info = true
+	images, _ := imgcache.New(b.TempDir(), "http://localhost/images/", false)
+	savedImages, savedCache, savedFilter := Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter
+	b.Cleanup(func() {
+		Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter = savedImages, savedCache, savedFilter
+		clearXMLTVCache()
+	})
+	Data.Cache.Images = images
+	clearXMLTVCache()
+	Settings.Filter = map[int64]interface{}{}
+	for i := 0; i < 20; i++ {
+		Settings.Filter[int64(i)] = map[string]interface{}{"filter": fmt.Sprintf("Group %d", i), "type": "group-title", "active": true}
+	}
+	file := System.Folder.Data + "bench.xml"
+	Data.Cache.XMLTV[file] = testGuide(1000, 50) // 50k programmes
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for c := 0; c < 200; c++ { // 200 mapped channels
+			get(XEPGChannelStruct{XmltvFile: "bench.xml", XMapping: fmt.Sprintf("ch%d.example", c), XChannelID: fmt.Sprint(c)})
+		}
+	}
+}
+
+func BenchmarkGetProgramData(b *testing.B)       { benchmarkProgramData(b, getProgramData) }
+func BenchmarkGetProgramDataLegacy(b *testing.B) { benchmarkProgramData(b, legacyGetProgramData) }
