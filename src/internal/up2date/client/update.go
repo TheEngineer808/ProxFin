@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/osext"
 )
@@ -35,8 +36,9 @@ func DoUpdate(fileType, filenameBIN string) (err error) {
 	if len(url) > 0 {
 		log.Println("["+strings.ToUpper(fileType)+"]", "New version ("+Updater.Name+"):", Updater.Response.Version)
 
-		// Download new binary
-		resp, err := http.Get(url)
+		// Download new binary. The timeout is generous (binaries are tens of
+		// MB) but stops a stalled download from blocking the caller forever.
+		resp, err := (&http.Client{Timeout: 15 * time.Minute}).Get(url)
 		if err != nil {
 			return err
 		}
@@ -148,9 +150,10 @@ func DoUpdate(fileType, filenameBIN string) (err error) {
 
 		} else {
 
-			// Restart binary (Linux and UNIX)
+			// Restart binary (Linux and UNIX). The old binary is kept until
+			// the new one is running (it removes it in Init), so a download
+			// that can't be executed can still be rolled back.
 			file, _ := osext.Executable()
-			os.RemoveAll(oldBinary)
 			err = syscall.Exec(file, os.Args, os.Environ())
 			if err != nil {
 				restorOldBinary(oldBinary, newBinary)
@@ -180,6 +183,16 @@ func start(args ...string) (p *os.Process, err error) {
 	}
 
 	return nil, err
+}
+
+// removeOldBinary deletes the copy of the previous version that an update
+// keeps until the new version has started.
+func removeOldBinary() {
+	binary, err := osext.Executable()
+	if err != nil {
+		return
+	}
+	os.Remove(getPlatformPath(binary) + "_old_" + getFilenameFromPath(binary))
 }
 
 func restorOldBinary(oldBinary, newBinary string) {
