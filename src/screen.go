@@ -289,6 +289,8 @@ func getErrMsg(errCode int) (errMsg string) {
 		errMsg = fmt.Sprintf("Automatic backup failed")
 
 	// Websockets
+	case 1103:
+		errMsg = fmt.Sprintf("Request from another website refused (cross-site request)")
 	case 1100:
 		errMsg = fmt.Sprintf("WebUI build error")
 	case 1101:
