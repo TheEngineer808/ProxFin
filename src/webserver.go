@@ -55,12 +55,33 @@ func StartWebserver() (err error) {
 	}
 	systemMutex.Unlock()
 
-	if err = http.ListenAndServe(ipAddress+":"+port, nil); err != nil {
+	if err = newHTTPServer(ipAddress+":"+port, nil).ListenAndServe(); err != nil {
 		ShowError(err, 1001)
 		return
 	}
 
 	return
+}
+
+// Timeouts of the HTTP server. There is deliberately no read or write
+// timeout for whole requests: streams last for hours and websocket
+// requests are hijacked.
+var (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 2 * time.Minute
+)
+
+// newHTTPServer returns the HTTP server for addr. http.ListenAndServe has no
+// timeouts at all, so a client that sends its headers slowly, or keeps an
+// idle keep-alive connection open, held a connection and a goroutine
+// forever.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
 }
 
 // Index : Web Server /
