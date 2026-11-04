@@ -283,11 +283,31 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		file = System.Folder.Data + getFilenameFromPath(path)
 		systemMutex.Unlock()
 
-		content, err = readStringFromFile(file)
+		// Stream the file instead of reading it into memory: guides are
+		// often hundreds of MB, and the string and []byte conversions held
+		// four copies per request. ServeContent also answers conditional
+		// and range requests.
+		f, err := os.Open(file)
 		if err != nil {
 			httpStatusError(w, r, 404)
 			return
 		}
+		defer f.Close()
+
+		info, err := f.Stat()
+		if err != nil || info.IsDir() {
+			httpStatusError(w, r, 404)
+			return
+		}
+
+		if strings.HasSuffix(strings.ToLower(file), ".gz") {
+			w.Header().Set("Content-Type", "application/x-gzip")
+		} else {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		}
+
+		http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+		return
 
 	}
 
@@ -309,17 +329,24 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		m3uFilePath := System.Folder.Data + "threadfin.m3u"
 		systemMutex.Unlock()
 
-		queries := r.URL.Query()
-		// Check if the m3u file exists
-		if len(queries) == 0 {
-			if _, err := os.Stat(m3uFilePath); err == nil {
-				log.Println("Serving existing m3u file")
-				http.ServeFile(w, r, m3uFilePath)
-				return
+		// Without a group filter the whole playlist is served from the file
+		// (other query parameters, e.g. username and password when M3U
+		// authentication is on, don't change it). buildM3U only writes the
+		// file in that case and returns no content, so serving its result
+		// sent an empty playlist and rebuilt the file on every request.
+		if len(groupTitle) == 0 {
+			if _, err := os.Stat(m3uFilePath); err != nil {
+				log.Println("M3U file does not exist, building new one")
+				if _, err = buildM3U([]string{}); err != nil {
+					ShowError(err, 000)
+					httpStatusError(w, r, 500)
+					return
+				}
 			}
-		}
 
-		log.Println("M3U file does not exist, building new one")
+			http.ServeFile(w, r, m3uFilePath)
+			return
+		}
 
 		systemMutex.Lock()
 		if !System.Dev {
@@ -1187,67 +1214,44 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 }
 
 func enablePPV(w http.ResponseWriter, r *http.Request) {
-	xepg, err := loadJSONFileToMap(System.File.XEPG)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
-	}
-
-	for _, c := range xepg {
-
-		var xepgChannel = c.(map[string]interface{})
-
-		if xepgChannel["x-mapping"] == "PPV" {
-			xepgChannel["x-active"] = true
-		}
-	}
-
-	err = saveMapToJSONFile(System.File.XEPG, xepg)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
-		w.WriteHeader(405)
-		return
-	}
-	buildXEPG(false)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
+	setPPVChannelsActive(w, true)
 }
 
 func disablePPV(w http.ResponseWriter, r *http.Request) {
-	xepg, err := loadJSONFileToMap(System.File.XEPG)
-	if err != nil {
-		var response APIResponseStruct
+	setPPVChannelsActive(w, false)
+}
 
+// setPPVChannelsActive activates or deactivates every channel mapped to
+// the PPV dummy guide. If xepg.json can't be read it stops: saving the
+// empty result used to replace every channel mapping with "null".
+func setPPVChannelsActive(w http.ResponseWriter, active bool) {
+
+	var fail = func(err error) {
+		var response APIResponseStruct
 		response.Status = false
 		response.Error = err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(mapToJSON(response)))
+	}
+
+	xepg, err := loadJSONFileToMap(System.File.XEPG)
+	if err != nil {
+		fail(err)
+		return
 	}
 
 	for _, c := range xepg {
-
-		var xepgChannel = c.(map[string]interface{})
-
-		if xepgChannel["x-mapping"] == "PPV" && xepgChannel["x-active"] == true {
-			xepgChannel["x-active"] = false
+		if xepgChannel, ok := c.(map[string]interface{}); ok && xepgChannel["x-mapping"] == "PPV" {
+			xepgChannel["x-active"] = active
 		}
 	}
 
-	err = saveMapToJSONFile(System.File.XEPG, xepg)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
+	if err = saveMapToJSONFile(System.File.XEPG, xepg); err != nil {
+		fail(err)
+		return
 	}
+
 	buildXEPG(false)
 
 	w.Header().Set("Content-Type", "application/json")
