@@ -291,13 +291,13 @@ func TestGetProgramDataMatchesLegacy(t *testing.T) {
 }
 
 func benchmarkProgramData(b *testing.B, get func(XEPGChannelStruct) (XMLTV, error)) {
-	System.Flag.Info = true
 	images, _ := imgcache.New(b.TempDir(), "http://localhost/images/", false)
-	savedImages, savedCache, savedFilter := Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter
+	savedImages, savedCache, savedFilter, savedInfo := Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter, System.Flag.Info
 	b.Cleanup(func() {
-		Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter = savedImages, savedCache, savedFilter
 		clearXMLTVCache()
+		Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter, System.Flag.Info = savedImages, savedCache, savedFilter, savedInfo
 	})
+	System.Flag.Info = true
 	Data.Cache.Images = images
 	clearXMLTVCache()
 	Settings.Filter = map[int64]interface{}{}

@@ -339,7 +339,8 @@ func createXEPGMapping() {
 // XEPG Datenbank erstellen / aktualisieren
 func createXEPGDatabase() (err error) {
 
-	var allChannelNumbers = make([]float64, 0, System.UnfilteredChannelLimit)
+	var channelNumbers = newChannelNumberAllocator()
+	var xepgIDs xepgIDAllocator
 	Data.Cache.Streams.Active = make([]string, 0, System.UnfilteredChannelLimit)
 	Data.XEPG.Channels = make(map[string]interface{}, System.UnfilteredChannelLimit)
 
@@ -412,35 +413,11 @@ func createXEPGDatabase() (err error) {
 	}
 
 	var createNewID = func() (xepg string) {
-
-		var firstID = 0 //len(Data.XEPG.Channels)
-
-	newXEPGID:
-
-		if _, ok := Data.XEPG.Channels["x-ID."+strconv.FormatInt(int64(firstID), 10)]; ok {
-			firstID++
-			goto newXEPGID
-		}
-
-		xepg = "x-ID." + strconv.FormatInt(int64(firstID), 10)
-		return
+		return xepgIDs.newID(Data.XEPG.Channels)
 	}
 
 	var getFreeChannelNumber = func(startingNumber float64) (xChannelID string) {
-
-		sort.Float64s(allChannelNumbers)
-
-		for {
-
-			if indexOfFloat64(startingNumber, allChannelNumbers) == -1 {
-				xChannelID = fmt.Sprintf("%g", startingNumber)
-				allChannelNumbers = append(allChannelNumbers, startingNumber)
-				return
-			}
-
-			startingNumber++
-
-		}
+		return channelNumbers.take(startingNumber)
 	}
 
 	showInfo("XEPG:" + "Update database")
@@ -459,7 +436,7 @@ func createXEPGDatabase() (err error) {
 		}
 
 		if xChannelID, err := strconv.ParseFloat(xepgChannel.XChannelID, 64); err == nil {
-			allChannelNumbers = append(allChannelNumbers, xChannelID)
+			channelNumbers.add(xChannelID)
 		}
 
 	}
@@ -751,6 +728,64 @@ func createXEPGDatabase() (err error) {
 	}
 
 	return
+}
+
+// xepgIDAllocator hands out the lowest free XEPG ID ("x-ID.<n>") of a
+// channel map that only grows while it is used. Every new channel used to
+// probe from x-ID.0, so N new channels took N²/2 map lookups.
+type xepgIDAllocator struct {
+	next int64 // x-ID.0 to x-ID.<next-1> are all taken
+}
+
+func (a *xepgIDAllocator) newID(channels map[string]interface{}) string {
+	for {
+		id := "x-ID." + strconv.FormatInt(a.next, 10)
+		if _, ok := channels[id]; !ok {
+			return id
+		}
+		a.next++
+	}
+}
+
+// channelNumberAllocator hands out channel numbers: the first of start,
+// start+1, start+2, ... not used yet. Numbers are only ever added, so for
+// each start the search continues where the last one ended. It used to
+// sort all numbers and search them linearly for every candidate, which is
+// cubic in the number of new channels (4,000 took 8 s, 20,000 minutes).
+type channelNumberAllocator struct {
+	used map[float64]struct{}
+	next map[float64]float64 // per start: all numbers from start to next (exclusive) are used
+}
+
+func newChannelNumberAllocator() *channelNumberAllocator {
+	return &channelNumberAllocator{used: make(map[float64]struct{}), next: make(map[float64]float64)}
+}
+
+func (c *channelNumberAllocator) add(number float64) {
+	if number == number { // a NaN never matches; the old search never found it either
+		c.used[number] = struct{}{}
+	}
+}
+
+func (c *channelNumberAllocator) take(start float64) string {
+
+	var number = start
+	if next, ok := c.next[start]; ok {
+		number = next
+	}
+
+	for {
+		if _, used := c.used[number]; !used || number+1 == number {
+			// (number+1 == number: no larger number exists, e.g. +Inf; the
+			// old search looped forever there)
+			c.add(number)
+			if start == start {
+				c.next[start] = number
+			}
+			return fmt.Sprintf("%g", number)
+		}
+		number++
+	}
 }
 
 // Kanäle automatisch zuordnen und das Mapping überprüfen
