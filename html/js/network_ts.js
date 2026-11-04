@@ -32,10 +32,10 @@ class Server {
             this.send(JSON.stringify(data));
         };
         ws.onerror = function (e) {
-            console.log("No websocket connection to Threadfin could be established. Check your network configuration.");
+            console.log("No websocket connection to ProxFin could be established. Check your network configuration.");
             SERVER_CONNECTION = false;
             if (WS_AVAILABLE == false) {
-                alert("No websocket connection to Threadfin could be established. Check your network configuration.");
+                alert("No websocket connection to ProxFin could be established. Check your network configuration.");
             }
         };
         ws.onmessage = function (e) {

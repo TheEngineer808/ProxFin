@@ -1,4 +1,10 @@
 var ACTIVE_MENU_KEY;
+// The built-in dummy guide. Mappings saved by Threadfin (which ProxFin is
+// based on) use its old name until the server converts them.
+var DUMMY_GUIDE = "ProxFin Dummy";
+function isDummyGuide(name) {
+    return name == DUMMY_GUIDE || name == "Threadfin Dummy";
+}
 // Font Awesome icons for the main navigation
 var MENU_ICONS = {
     "playlist": "fas fa-list-ul",
@@ -1294,7 +1300,7 @@ function openPopUp(dataType, element) {
             content.createHeadline(dataType);
             // Type
             var dbKey = "type";
-            var text = ["M3U: " + "{{.filter.type.groupTitle}}", "Threadfin: " + "{{.filter.type.customFilter}}"];
+            var text = ["M3U: " + "{{.filter.type.groupTitle}}", "ProxFin: " + "{{.filter.type.customFilter}}"];
             var values = ["javascript: openPopUp('group-title')", "javascript: openPopUp('custom-filter')"];
             var select = content.createSelect(text, values, "javascript: openPopUp('group-title')", dbKey);
             select.setAttribute("id", id);
@@ -1733,7 +1739,7 @@ class XMLTVFile {
         var values = new Array("-");
         var text = new Array("-");
         for (let i = 0; i < fileIDs.length; i++) {
-            if (fileIDs[i] != "Threadfin Dummy") {
+            if (!isDummyGuide(fileIDs[i])) {
                 values.push(getValueFromProviderFile(fileIDs[i], "xmltv", "file.threadfin"));
                 text.push(getValueFromProviderFile(fileIDs[i], "xmltv", "name"));
             }
@@ -1907,7 +1913,7 @@ class XMLTVFile {
     }
 }
 function getValueFromProviderFile(file, fileType, key) {
-    if (file == "Threadfin Dummy") {
+    if (isDummyGuide(file)) {
         return file;
     }
     var fileID;
@@ -1997,14 +2003,14 @@ function checkXmltvChannel(id, element, xmlFile) {
     updateLogo = (document.getElementById("update-icon") as HTMLInputElement).checked
     console.log(updateLogo);
     */
-    if (xmlFile != "Threadfin Dummy" && bool == true) {
+    if (!isDummyGuide(xmlFile) && bool == true) {
         //(document.getElementById("update-icon") as HTMLInputElement).checked = true;
         //(document.getElementById("update-icon") as HTMLInputElement).className = "changed";
         console.log("ID", id);
         changeChannelLogo(id);
         return;
     }
-    if (xmlFile == "Threadfin Dummy") {
+    if (isDummyGuide(xmlFile)) {
         document.getElementById("update-icon").checked = false;
         document.getElementById("update-icon").className = "changed";
     }
@@ -2018,7 +2024,7 @@ function changeChannelLogo(epgMapId) {
     const newXmlTvId = xmlTvIdInput.value;
     const updateLogo = !BULK_EDIT || document.getElementById('update-icon').checked;
     let logo;
-    if (updateLogo == true && xmlTvFile != 'Threadfin Dummy') {
+    if (updateLogo == true && !isDummyGuide(xmlTvFile)) {
         if (SERVER['xepg']['xmltvMap'][xmlTvFile].hasOwnProperty(newXmlTvId)) {
             logo = SERVER['xepg']['xmltvMap'][xmlTvFile][newXmlTvId]['icon'];
         }
@@ -2229,7 +2235,7 @@ function donePopupData(dataType, idsStr) {
                     document.getElementById(id).childNodes[5].firstChild.innerHTML = value;
                     break;
                 case "x-xmltv-file":
-                    if (value != "Threadfin Dummy" && value != "-") {
+                    if (!isDummyGuide(value) && value != "-") {
                         value = getValueFromProviderFile(value, "xmltv", "name");
                     }
                     if (value == "-") {

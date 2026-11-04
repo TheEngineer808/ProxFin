@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	up2date "threadfin/src/internal/up2date/client"
+	up2date "proxfin/src/internal/up2date/client"
 
 	"github.com/hashicorp/go-version"
 
@@ -21,7 +21,7 @@ func BinaryUpdate() (err error) {
 
 	if !System.GitHub.Update {
 		// Not a problem to warn about on every start: this build has no
-		// release source configured (see GitHub in threadfin.go).
+		// release source configured (see GitHub in proxfin.go).
 		showInfo("Update:Automatic updates are disabled in this build")
 		return
 	}
@@ -51,7 +51,7 @@ func BinaryUpdate() (err error) {
 		var git []*GithubReleaseInfo
 
 		// Without a timeout a stalled connection would block the start of
-		// Threadfin (this runs before the web server starts) or, later, the
+		// ProxFin (this runs before the web server starts) or, later, the
 		// scheduler that refreshes playlists and guides.
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Get(releaseInfo)
@@ -101,7 +101,7 @@ func BinaryUpdate() (err error) {
 			}
 		}
 
-		var File = fmt.Sprintf("%s/releases/download/%s/%s_%s_%s", System.Update.Git, latest, "Threadfin", System.OS, System.ARCH)
+		var File = fmt.Sprintf("%s/releases/download/%s/%s_%s_%s", System.Update.Git, latest, System.Name, System.OS, System.ARCH)
 
 		updater.Response.Status = true
 		updater.Response.UpdateBIN = File

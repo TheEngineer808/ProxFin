@@ -105,12 +105,12 @@ func stopSSDP() {
 	}
 }
 
-// Shutdown stops what must not outlive Threadfin: the stream processes
+// Shutdown stops what must not outlive ProxFin: the stream processes
 // (FFmpeg/VLC run in their own process groups, so they would keep running
 // and holding the providers' connections) and the SSDP announcement.
 func Shutdown() {
 
-	showInfo("Threadfin:Shutting down")
+	showInfo(System.Name + ":Shutting down")
 
 	if err := streamManager.Shutdown(5 * time.Second); err != nil {
 		ShowError(err, 0)

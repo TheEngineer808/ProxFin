@@ -127,6 +127,9 @@ func parseMetaData(channel string) (stream map[string]string) {
 	// Only generate a new tvg-id if it's missing, blank, or (no tvg-id)
 	if stream["tvg-id"] == "" || stream["tvg-id"] == "(no tvg-id)" {
 		hash := md5.Sum([]byte(stream["url"]))
+		// The "threadfin-" prefix is kept from Threadfin (which ProxFin is
+		// based on): the id identifies the channel in existing databases
+		// and in the guides of DVR clients.
 		stream["tvg-id"] = fmt.Sprintf("threadfin-%x", hash)
 	}
 

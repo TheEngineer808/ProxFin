@@ -328,9 +328,9 @@ func getErrMsg(errCode int) (errMsg string) {
 	case 2010:
 		errMsg = fmt.Sprintf("No valid streaming URL")
 	case 2020:
-		errMsg = fmt.Sprintf("FFmpeg binary was not found. Check the FFmpeg binary path in the Threadfin settings.")
+		errMsg = fmt.Sprintf("FFmpeg binary was not found. Check the FFmpeg binary path in the " + System.Name + " settings.")
 	case 2021:
-		errMsg = fmt.Sprintf("VLC binary was not found. Check the VLC path binary in the Threadfin settings.")
+		errMsg = fmt.Sprintf("VLC binary was not found. Check the VLC path binary in the " + System.Name + " settings.")
 
 	case 2098:
 		errMsg = fmt.Sprintf("Updates are disabled in the settings")
@@ -401,7 +401,7 @@ func getErrMsg(errCode int) (errMsg string) {
 	case 6003:
 		errMsg = fmt.Sprintf("Update server not available")
 	case 6004:
-		errMsg = fmt.Sprintf("Threadfin update available")
+		errMsg = fmt.Sprintf("%s update available", System.Name)
 
 	default:
 		errMsg = fmt.Sprintf("Unknown error / warning (%d)", errCode)

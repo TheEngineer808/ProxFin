@@ -1,5 +1,12 @@
 var ACTIVE_MENU_KEY: string
 
+// The built-in dummy guide. Mappings saved by Threadfin (which ProxFin is
+// based on) use its old name until the server converts them.
+var DUMMY_GUIDE = "ProxFin Dummy"
+function isDummyGuide(name: string): boolean {
+  return name == DUMMY_GUIDE || name == "Threadfin Dummy"
+}
+
 // Font Awesome icons for the main navigation
 var MENU_ICONS: object = {
   "playlist": "fas fa-list-ul",
@@ -1605,7 +1612,7 @@ function openPopUp(dataType, element) {
 
       // Type
       var dbKey: string = "type"
-      var text: string[] = ["M3U: " + "{{.filter.type.groupTitle}}", "Threadfin: " + "{{.filter.type.customFilter}}"]
+      var text: string[] = ["M3U: " + "{{.filter.type.groupTitle}}", "ProxFin: " + "{{.filter.type.customFilter}}"]
       var values: string[] = ["javascript: openPopUp('group-title')", "javascript: openPopUp('custom-filter')"]
       var select = content.createSelect(text, values, "javascript: openPopUp('group-title')", dbKey)
       select.setAttribute("id", id)
@@ -2132,7 +2139,7 @@ class XMLTVFile {
     var text = new Array("-");
 
     for (let i = 0; i < fileIDs.length; i++) {
-      if (fileIDs[i] != "Threadfin Dummy") {
+      if (!isDummyGuide(fileIDs[i])) {
         values.push(getValueFromProviderFile(fileIDs[i], "xmltv", "file.threadfin"))
         text.push(getValueFromProviderFile(fileIDs[i], "xmltv", "name"))
       } else {
@@ -2342,7 +2349,7 @@ class XMLTVFile {
 
 function getValueFromProviderFile(file: string, fileType, key) {
 
-  if (file == "Threadfin Dummy") {
+  if (isDummyGuide(file)) {
     return file
   }
 
@@ -2459,7 +2466,7 @@ function checkXmltvChannel(id: string, element: any, xmlFile) {
   console.log(updateLogo);
   */
 
-  if (xmlFile != "Threadfin Dummy" && bool == true) {
+  if (!isDummyGuide(xmlFile) && bool == true) {
 
     //(document.getElementById("update-icon") as HTMLInputElement).checked = true;
     //(document.getElementById("update-icon") as HTMLInputElement).className = "changed";
@@ -2470,7 +2477,7 @@ function checkXmltvChannel(id: string, element: any, xmlFile) {
     return
   }
 
-  if (xmlFile == "Threadfin Dummy") {
+  if (isDummyGuide(xmlFile)) {
     (document.getElementById("update-icon") as HTMLInputElement).checked = false;
     (document.getElementById("update-icon") as HTMLInputElement).className = "changed";
   }
@@ -2492,7 +2499,7 @@ function changeChannelLogo(epgMapId: string) {
 
   let logo: string;
 
-  if (updateLogo == true && xmlTvFile != 'Threadfin Dummy') {
+  if (updateLogo == true && !isDummyGuide(xmlTvFile)) {
 
     if (SERVER['xepg']['xmltvMap'][xmlTvFile].hasOwnProperty(newXmlTvId)) {
       logo = SERVER['xepg']['xmltvMap'][xmlTvFile][newXmlTvId]['icon'];
@@ -2790,7 +2797,7 @@ function donePopupData(dataType: string, idsStr: string) {
           break
 
         case "x-xmltv-file":
-          if (value != "Threadfin Dummy" && value != "-") {
+          if (!isDummyGuide(value) && value != "-") {
             value = getValueFromProviderFile(value, "xmltv", "name")
           }
 

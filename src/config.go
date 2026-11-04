@@ -79,17 +79,17 @@ func Init() (err error) {
 	Settings.LogEntriesRAM = 500
 
 	// Variablen für den Update Prozess
-	//System.Update.Git = "https://github.com/Threadfin/Threadfin/blob"
 	System.Update.Git = fmt.Sprintf("https://github.com/%s/%s", System.GitHub.User, System.GitHub.Repo)
 	System.Update.Github = fmt.Sprintf("https://api.github.com/repos/%s/%s", System.GitHub.User, System.GitHub.Repo)
-	System.Update.Name = "Threadfin"
+	System.Update.Name = System.Name
 
 	// Ordnerpfade festlegen
 	var tempFolder = os.TempDir() + string(os.PathSeparator) + System.AppName + string(os.PathSeparator)
 	tempFolder = getPlatformPath(strings.Replace(tempFolder, "//", "/", -1))
 
+	var legacyConfig bool
 	if len(System.Folder.Config) == 0 {
-		System.Folder.Config = GetUserHomeDirectory() + string(os.PathSeparator) + "." + System.AppName + string(os.PathSeparator)
+		System.Folder.Config, legacyConfig = defaultConfigFolder()
 	} else {
 		System.Folder.Config = strings.TrimRight(System.Folder.Config, string(os.PathSeparator)) + string(os.PathSeparator)
 	}
@@ -105,6 +105,10 @@ func Init() (err error) {
 
 	// Dev Info
 	showDevInfo()
+
+	if legacyConfig {
+		showInfo("Config:Using the existing Threadfin settings in " + System.Folder.Config)
+	}
 
 	// System Ordner erstellen
 	err = createSystemFolders()
@@ -139,7 +143,7 @@ func Init() (err error) {
 	fmt.Println("For help run: " + getPlatformFile(os.Args[0]) + " -h")
 	fmt.Println()
 
-	// Überprüfen ob Threadfin als root läuft
+	// Überprüfen ob ProxFin als root läuft
 	if os.Geteuid() == 0 {
 		showWarning(2110)
 	}

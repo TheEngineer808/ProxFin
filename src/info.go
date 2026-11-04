@@ -68,7 +68,7 @@ func ShowSystemInfo() {
 	println("---")
 
 	fmt.Println("Settings [General]")
-	fmt.Println(fmt.Sprintf("Threadfin Update:        %t", Settings.ThreadfinAutoUpdate))
+	fmt.Println(fmt.Sprintf("%-25s%t", System.Name+" Update:", Settings.ThreadfinAutoUpdate))
 	fmt.Println(fmt.Sprintf("UUID:                %s", Settings.UUID))
 	fmt.Println(fmt.Sprintf("Tuner (Plex / Emby): %d", Settings.Tuner))
 	fmt.Println(fmt.Sprintf("EPG Source:          %s", Settings.EpgSource))

@@ -35,7 +35,7 @@ func maintenance() {
 
 			}
 
-			// Update Threadfin (Binary)
+			// Update ProxFin (Binary)
 			systemMutex.Lock()
 			if System.TimeForAutoUpdate == t.Format("1504") {
 				systemMutex.Unlock()

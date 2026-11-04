@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	m3u "threadfin/src/internal/m3u-parser"
+	m3u "proxfin/src/internal/m3u-parser"
 )
 
 // Playlisten parsen
@@ -230,10 +230,10 @@ func checkConditions(streamValues, conditions, coType string) (status bool) {
 	return
 }
 
-// Threadfin M3U Datei erstellen
+// ProxFin M3U Datei erstellen
 
 // buildM3U returns the playlist of the given groups, or of all channels
-// if groups is empty. The full playlist is also saved as threadfin.m3u, as
+// if groups is empty. The full playlist is also saved as proxfin.m3u, as
 // before; it used to be returned empty in that case, so a request for the
 // playlist with any query parameter (e.g. the username and password of M3U
 // authentication) but no group-title got an empty response.
@@ -254,13 +254,13 @@ func buildM3U(groups []string) (m3u string, err error) {
 	return content.String(), nil
 }
 
-// saveM3UFile writes the playlist of all channels to threadfin.m3u, and to
+// saveM3UFile writes the playlist of all channels to proxfin.m3u, and to
 // copyTo if it isn't nil.
 func saveM3UFile(copyTo io.Writer) (err error) {
 
 	// Written next to the playlist and renamed into place, so /m3u/ never
 	// serves a partly written playlist while it is rebuilt.
-	filename := System.Folder.Data + "threadfin.m3u"
+	filename := System.File.M3U
 	file, err := createAtomic(filename)
 	if err != nil {
 		return err
@@ -354,9 +354,9 @@ func writeM3U(w io.Writer, groups []string) (err error) {
 	}
 
 	// Prepare header
-	var xmltvURL = fmt.Sprintf("%s://%s/xmltv/threadfin.xml", System.ServerProtocol.XML, System.Domain)
+	var xmltvURL = fmt.Sprintf("%s://%s/xmltv/%s.xml", System.ServerProtocol.XML, System.Domain, System.AppName)
 	if Settings.ForceHttps && Settings.HttpsThreadfinDomain != "" {
-		xmltvURL = fmt.Sprintf("https://%s/xmltv/threadfin.xml", Settings.HttpsThreadfinDomain)
+		xmltvURL = fmt.Sprintf("https://%s/xmltv/%s.xml", Settings.HttpsThreadfinDomain, System.AppName)
 	}
 	header := fmt.Sprintf(`#EXTM3U url-tvg="%s" x-tvg-url="%s"`+"\n", xmltvURL, xmltvURL)
 

@@ -3,11 +3,11 @@ name: Bug report
 about: Create a report to help us improve
 title: ''
 labels: ''
-assignees: Fyb3roptik
+assignees: TheEngineer808
 
 ---
 
-#### Please first read the [documentation](https://github.com/Threadfin/Threadfin/blob/main/en/configuration.md). Problems affecting the client, e.g. Plex or Emby should be reported there in the forum.
+#### Please first read the [README](https://github.com/TheEngineer808/ProxFin#readme) and the [configuration guide](https://github.com/xteve-project/xTeVe-Documentation/blob/master/en/configuration.md) (written for xTeVe, still accurate for ProxFin). Problems with the client itself, e.g. Plex or Emby, should be reported in its forum. Please don't report ProxFin problems to the Threadfin or xTeVe projects.
 
 **Describe the bug**
 A clear and concise description of what the bug is.
@@ -15,7 +15,7 @@ A clear and concise description of what the bug is.
 **Server (please complete the following information):**
 - OS [e.g. Linux - Ubuntu]
 - Arch [e.g. Intel 64 Bit]
-- Threadfin Version and Build [to be found in the Threadfin log]
+- ProxFin version and build [shown in Server information, and at the top of the log]
 
 **To Reproduce**
 Steps to reproduce the behavior:

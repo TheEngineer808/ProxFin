@@ -181,12 +181,12 @@
     },
     "http_user_origin": {
       "title": "User Header Origin",
-      "description": "User Header Origin for HTTP requests. For every HTTP connection, this value is used for the user header origin. Should only be changed if Threadfin is blocked.",
+      "description": "User Header Origin for HTTP requests. For every HTTP connection, this value is used for the user header origin. Should only be changed if ProxFin is blocked.",
       "placeholder": "HTTP Origin"
     },
     "http_user_referer": {
       "title": "User Header Referer",
-      "description": "User Header Referer for HTTP requests. For every HTTP connection, this value is used for the user header referer. Should only be changed if Threadfin is blocked.",
+      "description": "User Header Referer for HTTP requests. For every HTTP connection, this value is used for the user header referer. Should only be changed if ProxFin is blocked.",
       "placeholder": "HTTP Referer"
     }
   },
@@ -286,7 +286,7 @@
       "description": ""
     },
     "m3uGroupTitle": {
-      "title": "Group Title (threadfin.m3u)",
+      "title": "Group Title (proxfin.m3u)",
       "placeholder": "",
       "description": ""
     },
@@ -397,11 +397,11 @@
     },
     "api": {
       "title": "API Interface",
-      "description": "Via API interface it is possible to send commands to Threadfin. API documentation is <a href='https://github.com/Threadfin/Threadfin-Documentation/blob/master/en/configuration.md#api'>here</a>"
+      "description": "Via API interface it is possible to send commands to ProxFin. API documentation is <a href='https://github.com/xteve-project/xTeVe-Documentation/blob/master/en/configuration.md'>here</a>"
     },
     "ssdp": {
       "title": "SSDP",
-      "description": "SSDP is a network protocol for service discovery. It is used for the automatic detection of Threadfin in the network."
+      "description": "SSDP is a network protocol for service discovery. It is used for the automatic detection of ProxFin in the network."
     },
     "dummy": {
       "title": "Enable Default Dummy Data",
@@ -421,7 +421,7 @@
     },
     "tuner": {
       "title": "Number of Tuners",
-      "description": "Number of parallel connections that can be established to the provider.<br>Available for: Plex, Emby, Jellyfin, M3U (with active buffer).<br>After a change, Threadfin must be delete in the Plex / Emby / Jellyfin DVR settings and set up again."
+      "description": "Number of parallel connections that can be established to the provider.<br>Available for: Plex, Emby, Jellyfin, M3U (with active buffer).<br>After a change, ProxFin must be delete in the Plex / Emby / Jellyfin DVR settings and set up again."
     },
     "filesUpdate": {
       "title": "Updates all files at startup",
@@ -440,8 +440,8 @@
       "description": "Use this if your provider maps the PPV event name to the channel name"
     },
     "ThreadfinAutoUpdate": {
-      "title": "Automatic update of Threadfin",
-      "description": "If a new version of Threadfin is available, it will be automatically installed. The updates are downloaded from GitHub."
+      "title": "Automatic update of ProxFin",
+      "description": "If a new version of ProxFin is available, it will be automatically installed. The updates are downloaded from GitHub."
     },
     "streamBuffering": {
       "title": "Stream Buffer",
@@ -452,7 +452,7 @@
     },
     "udpxy": {
       "title": "UDPxy address",
-      "description": "The address of your UDPxy server. If set, and the channel URLs in the m3u is multicast, Threadfin will rewrite it so that it is accessed via the UDPxy service.",
+      "description": "The address of your UDPxy server. If set, and the channel URLs in the m3u is multicast, ProxFin will rewrite it so that it is accessed via the UDPxy service.",
       "placeholder": "host:port"
     },
     "ffmpegPath": {
@@ -505,8 +505,8 @@
     },
     "httpsThreadfinDomain":
     {
-      "title": "HTTPS Threadfin Domain",
-      "description": "With image caching enabled, rewrite the threadfin ip address in the m3u to use a domain for HTTPS mode. Do NOT include https (ex: somedomain.com)"
+      "title": "HTTPS ProxFin Domain",
+      "description": "With image caching enabled, rewrite the ProxFin IP address in the m3u to use a domain for HTTPS mode. Do NOT include https (ex: somedomain.com)"
     },
     "bindIpAddress":
     {
@@ -515,8 +515,8 @@
     },
     "httpThreadfinDomain":
     {
-      "title": "HTTP Threadfin Domain",
-      "description": "With image caching enabled, rewrite the threadfin ip address in the m3u to use a domain for HTTP mode. Do NOT include http (ex: somedomain.com)"
+      "title": "HTTP ProxFin Domain",
+      "description": "With image caching enabled, rewrite the ProxFin IP address in the m3u to use a domain for HTTP mode. Do NOT include http (ex: somedomain.com)"
     },
     "enableNonAscii":
     {
@@ -540,17 +540,17 @@
     },
     "userAgent": {
       "title": "User Agent",
-      "description": "User Agent for HTTP requests. For every HTTP connection, this value is used for the user agent. Should only be changed if Threadfin is blocked.",
-      "placeholder": "Threadfin"
+      "description": "User Agent for HTTP requests. For every HTTP connection, this value is used for the user agent. Should only be changed if ProxFin is blocked.",
+      "placeholder": "ProxFin"
     },
     "backupPath": {
       "title": "Location for automatic backups",
-      "placeholder": "/mnt/data/backup/threadfin/",
-      "description": "Before any update of the provider data by the schedule, Threadfin creates a backup. The path for the automatic backups can be changed. Threadfin requires write permission for this folder."
+      "placeholder": "/mnt/data/backup/proxfin/",
+      "description": "Before any update of the provider data by the schedule, ProxFin creates a backup. The path for the automatic backups can be changed. ProxFin requires write permission for this folder."
     },
     "tempPath": {
       "title": "Location for the temporary files",
-      "placeholder": "/tmp/threadfin/",
+      "placeholder": "/tmp/proxfin/",
       "description": "Location for the buffer files."
     },
     "backupKeep": {
@@ -563,15 +563,15 @@
     },
     "authenticationPMS": {
       "title": "PMS Authentication",
-      "description": "Plex requests are only possible with authentication. <br><b>Warning!!!</b> After activating this function Threadfin must be delete in the PMS DVR settings and set up again."
+      "description": "Plex requests are only possible with authentication. <br><b>Warning!!!</b> After activating this function ProxFin must be delete in the PMS DVR settings and set up again."
     },
     "authenticationM3U": {
       "title": "M3U Authentication",
-      "description": "Downloading the threadfin.m3u file via an HTTP request is only possible with authentication."
+      "description": "Downloading the proxfin.m3u file via an HTTP request is only possible with authentication."
     },
     "authenticationXML": {
       "title": "XML Authentication",
-      "description": "Downloading the threadfin.xml file via an HTTP request is only possible with authentication"
+      "description": "Downloading the proxfin.xml file via an HTTP request is only possible with authentication"
     },
     "authenticationAPI": {
       "title": "API Authentication",
@@ -585,7 +585,7 @@
     },
     "tuner": {
       "title": "Number of tuners",
-      "description": "Number of parallel connections that can be established to the provider.<br>Available for: Plex, Emby, Jellyfin, M3U (with active buffer).<br>After a change, Threadfin must be delete in the Plex / Emby / Jellyfin DVR settings and set up again."
+      "description": "Number of parallel connections that can be established to the provider.<br>Available for: Plex, Emby, Jellyfin, M3U (with active buffer).<br>After a change, ProxFin must be delete in the Plex / Emby / Jellyfin DVR settings and set up again."
     },
     "m3u": {
       "title": "M3U Playlist",

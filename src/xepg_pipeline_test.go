@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"threadfin/src/internal/imgcache"
+	"proxfin/src/internal/imgcache"
 )
 
 // usePipelineFolders points the files and caches the playlist/EPG pipeline
@@ -49,6 +49,7 @@ func usePipelineFolders(t testing.TB) string {
 		t.Fatal(err)
 	}
 	System.File.XML = filepath.Join(dir, "threadfin.xml")
+	System.File.M3U = filepath.Join(dir, "threadfin.m3u")
 	System.Compressed.GZxml = filepath.Join(dir, "threadfin.xml.gz")
 	System.File.XEPG = filepath.Join(dir, "xepg.json")
 	System.File.URLS = filepath.Join(dir, "urls.json")
@@ -199,7 +200,7 @@ func TestCreateXEPGMappingDropsMissingXMLTV(t *testing.T) {
 		if len(names) != 2 || strings.Contains(strings.Join(names, ","), "X2") {
 			t.Fatalf("run %d: XMLTV files %v, want X1.xml and X3.xml", run, names)
 		}
-		for _, f := range []string{"X1.xml", "X3.xml", "Threadfin Dummy"} {
+		for _, f := range []string{"X1.xml", "X3.xml", dummyXMLTVFile} {
 			if _, ok := Data.XMLTV.Mapping[f]; !ok {
 				t.Fatalf("run %d: mapping lacks %s", run, f)
 			}

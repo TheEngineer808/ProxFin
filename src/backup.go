@@ -12,7 +12,7 @@ import (
 
 func ThreadfinAutoBackup() (err error) {
 
-	var archiv = "threadfin_auto_backup_" + time.Now().Format("20060102_1504") + ".zip"
+	var archiv = System.AppName + "_auto_backup_" + time.Now().Format("20060102_1504") + ".zip"
 	var target string
 	var sourceFiles = make([]string, 0)
 	var oldBackupFiles = make([]string, 0)
@@ -37,7 +37,7 @@ func ThreadfinAutoBackup() (err error) {
 
 		for _, file := range files {
 
-			if filepath.Ext(file.Name()) == ".zip" && strings.Contains(file.Name(), "threadfin_auto_backup") {
+			if filepath.Ext(file.Name()) == ".zip" && strings.Contains(file.Name(), System.AppName+"_auto_backup") {
 				oldBackupFiles = append(oldBackupFiles, file.Name())
 			}
 
@@ -104,7 +104,7 @@ func ThreadfinBackup() (archiv string, err error) {
 		return
 	}
 
-	archiv = "threadfin_backup_" + time.Now().Format("20060102_1504") + ".zip"
+	archiv = System.AppName + "_backup_" + time.Now().Format("20060102_1504") + ".zip"
 
 	var target = System.Folder.Temp + archiv
 	var sourceFiles = make([]string, 0)

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	m3u "threadfin/src/internal/m3u-parser"
+	m3u "proxfin/src/internal/m3u-parser"
 )
 
 // fileType: Welcher Dateityp soll aktualisiert werden (m3u, hdhr, xml) | fileID: Update einer bestimmten Datei (Provider ID)
@@ -35,7 +35,7 @@ func getProviderData(fileType, fileID string) (err error) {
 		}
 
 		// Default keys für die Providerdaten
-		var keys = []string{"name", "description", "type", "file." + System.AppName, "file.source", "tuner", "http_proxy.ip", "http_proxy.port", "last.update", "compatibility", "counter.error", "counter.download", "provider.availability"}
+		var keys = []string{"name", "description", "type", providerFileKey, "file.source", "tuner", "http_proxy.ip", "http_proxy.port", "last.update", "compatibility", "counter.error", "counter.download", "provider.availability"}
 
 		for _, key := range keys {
 
@@ -52,7 +52,7 @@ func getProviderData(fileType, fileID string) (err error) {
 				case "type":
 					data[key] = fileType
 
-				case "file." + System.AppName:
+				case providerFileKey:
 					data[key] = id + fileExtension
 
 				case "file.source":
@@ -148,7 +148,7 @@ func getProviderData(fileType, fileID string) (err error) {
 			return
 		}
 
-		var filePath = System.Folder.Data + data["file."+System.AppName].(string)
+		var filePath = System.Folder.Data + data[providerFileKey].(string)
 
 		err = writeByteToFile(filePath, body)
 

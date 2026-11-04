@@ -107,7 +107,7 @@ func updateUrlsJson() {
 	buildXEPG(false)
 }
 
-// Einstellungen laden und default Werte setzen (Threadfin)
+// Einstellungen laden und default Werte setzen (ProxFin)
 // The FFmpeg default options. "?" makes the maps optional, so radio (no
 // video) and video-only channels work. -copyts keeps the source's
 // timestamps: when the buffer reconnects to the same live channel, the
@@ -253,7 +253,7 @@ func loadSettings() (settings SettingsStruct, err error) {
 	return settings, nil
 }
 
-// Einstellungen speichern (Threadfin)
+// Einstellungen speichern (ProxFin)
 func saveSettings(settings SettingsStruct) (err error) {
 
 	if settings.BackupKeep == 0 {
@@ -281,7 +281,7 @@ func saveSettings(settings SettingsStruct) (err error) {
 		Settings = settings
 
 		if System.Dev == true {
-			Settings.UUID = "2019-01-DEV-Threadfin!"
+			Settings.UUID = "2019-01-DEV-ProxFin!"
 		}
 	})
 
@@ -304,16 +304,16 @@ func setGlobalDomain(domain string) {
 
 	switch Settings.AuthenticationM3U {
 	case true:
-		System.Addresses.M3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/threadfin.m3u?username=xxx&password=yyy"
+		System.Addresses.M3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/" + System.AppName + ".m3u?username=xxx&password=yyy"
 	case false:
-		System.Addresses.M3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/threadfin.m3u"
+		System.Addresses.M3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/" + System.AppName + ".m3u"
 	}
 
 	switch Settings.AuthenticationXML {
 	case true:
-		System.Addresses.XML = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/threadfin.xml?username=xxx&password=yyy"
+		System.Addresses.XML = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/" + System.AppName + ".xml?username=xxx&password=yyy"
 	case false:
-		System.Addresses.XML = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/threadfin.xml"
+		System.Addresses.XML = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/" + System.AppName + ".xml"
 	}
 
 	if Settings.EpgSource != "XEPG" {
@@ -347,7 +347,7 @@ func setDeviceID() {
 	return
 }
 
-// Provider Streaming-URL zu Threadfin Streaming-URL konvertieren
+// Provider Streaming-URL zu ProxFin Streaming-URL konvertieren
 func createStreamingURL(streamingType, playlistID, channelNumber, channelName, url string, backup_channel_1 *BackupStream, backup_channel_2 *BackupStream, backup_channel_3 *BackupStream) (streamingURL string, err error) {
 
 	var serverProtocol string

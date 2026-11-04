@@ -9,7 +9,7 @@ import (
 )
 
 // The streaming URL cache (Data.Cache.StreamingURLS) maps the IDs in
-// Threadfin's /stream/ URLs to the provider URLs. Channel tunes read it
+// ProxFin's /stream/ URLs to the provider URLs. Channel tunes read it
 // while playlist and EPG updates rebuild it, so all access goes through
 // these functions.
 //

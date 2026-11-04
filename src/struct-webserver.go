@@ -2,7 +2,7 @@ package src
 
 // RequestStruct : Anfragen über die Websocket Schnittstelle
 type RequestStruct struct {
-	// Befehle an Threadfin
+	// Befehle an ProxFin
 	Cmd string `json:"cmd,required"`
 
 	// Benutzer

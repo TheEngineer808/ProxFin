@@ -1,5 +1,5 @@
 /*
-  Threadfin web UI – layout and page styles
+  ProxFin web UI – layout and page styles
 */
 
 /* =========================================================
@@ -34,9 +34,9 @@ body.app {
 
 #logo {
   display: block;
-  width: 132px;
+  width: 150px;
   height: 37px;
-  background: url("../img/threadfin.png") no-repeat left center;
+  background: url("../img/proxfin.png") no-repeat left center;
   background-size: contain;
 }
 
@@ -992,7 +992,7 @@ body.auth {
   height: 40px;
   margin: 32px auto 8px;
   width: 150px;
-  background: url("../img/threadfin.png") no-repeat center;
+  background: url("../img/proxfin.png") no-repeat center;
   background-size: contain;
 }
 

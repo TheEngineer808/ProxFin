@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"threadfin/src/internal/streambuf"
+	"proxfin/src/internal/streambuf"
 )
 
 // These tests drive the whole buffer (HTTP handler, stream manager, real

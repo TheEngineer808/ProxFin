@@ -9,7 +9,7 @@ import (
 
 // crossSiteRequest reports whether r was sent by a browser on behalf of
 // another website: a page the user happens to open, anywhere on the
-// internet, can make the browser send requests to Threadfin on the local
+// internet, can make the browser send requests to ProxFin on the local
 // network. With web authentication off (the default) that page could
 // otherwise change any setting through the web interface's websocket,
 // including the FFmpeg path and options, i.e. run commands on the server.

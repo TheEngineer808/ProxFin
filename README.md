@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="html/img/threadfin.png" width="285" height="80" alt="Threadfin" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/proxfin.png" />
+  <img src="docs/brand/proxfin-dark-text.png" width="340" alt="ProxFin" />
+</picture>
 
 ### M3U proxy for Plex DVR, Emby and Jellyfin Live TV
 #### with a stream buffer rebuilt from the ground up
@@ -11,8 +14,10 @@
 
 </div>
 
-> **A community rebuild of [Threadfin](https://github.com/Threadfin/Threadfin), which is itself based on [xTeVe](https://github.com/xteve-project/xTeVe).**
-> Threadfin and xTeVe did the hard work of making IPTV playlists usable in Plex, Emby and Jellyfin. This project builds on their code, and all credit for the original goes to their authors. See [Credits](#credits).
+> **ProxFin is a community rebuild of [Threadfin](https://github.com/Threadfin/Threadfin), which is itself based on [xTeVe](https://github.com/xteve-project/xTeVe).**
+> Threadfin and xTeVe did the hard work of making IPTV playlists usable in Plex, Emby and Jellyfin. ProxFin builds on their code, and all credit for the original goes to their authors. See [Credits](#credits).
+>
+> Coming from Threadfin? Your settings, mappings and DVR setup carry over. See [Switching from Threadfin](#switching-from-threadfin).
 
 ![Channel mapping](docs/screenshots/mapping.png)
 
@@ -27,7 +32,7 @@
 - [Performance](#performance)
 - [Features](#features)
 - [Installation](#installation)
-- [Upgrading from Threadfin](#upgrading-from-threadfin)
+- [Switching from Threadfin](#switching-from-threadfin)
 - [Development](#development)
 - [Known limitations](#known-limitations)
 - [Credits](#credits)
@@ -37,7 +42,7 @@
 
 ## What's different
 
-Threadfin presents your IPTV playlists and XMLTV guides to Plex, Emby and Jellyfin as a network TV tuner. This fork keeps everything it does and changes three things:
+ProxFin presents your IPTV playlists and XMLTV guides to Plex, Emby and Jellyfin as a network TV tuner. It started as Threadfin and keeps everything Threadfin does, with three big changes:
 
 1. **The stream buffer was rewritten from scratch.** The old buffer wrote 512 KB segment files to disk and polled them. The new one shares one FFmpeg/VLC process per channel through an in-memory buffer, starts every viewer on a clean keyframe, and survives source dropouts without disconnecting anyone.
 2. **The web interface was redesigned.** It has a sidebar app shell, a consistent dark theme and a layout that works on a phone.
@@ -100,7 +105,7 @@ flowchart LR
 ### Process and resource safety
 
 - FFmpeg and VLC run in their own process group, and are always killed together with their children. Their stderr is always drained, and its last lines are logged when a process fails.
-- **Graceful shutdown.** On `SIGINT` or `SIGTERM` (Ctrl+C, `docker stop`, systemd) every stream is stopped before Threadfin exits. Previously FFmpeg processes could outlive Threadfin and keep holding provider connections.
+- **Graceful shutdown.** On `SIGINT` or `SIGTERM` (Ctrl+C, `docker stop`, systemd) every stream is stopped before ProxFin exits. Previously FFmpeg processes could outlive the program and keep holding provider connections.
 - Chunk memory is pooled and reference-counted, so the garbage collector has almost nothing to do: **0 GC cycles in 20 s** under load, against 15 for the old buffer.
 - Viewers waiting for the next batch are woken once per batch instead of once per chunk. A channel with 200 viewers uses 2–4× less CPU.
 - Write buffers are pooled across connections. A connect-and-leave (Plex probes every channel) allocates 31 KB instead of 289 KB.
@@ -118,7 +123,7 @@ flowchart LR
 
 | Scenario | Old buffer | New buffer |
 |---|---|---|
-| 20 channels × 5 viewers, 8 Mbps, Threadfin's own CPU | 18.6 % of a core | 16.9 % of a core |
+| 20 channels × 5 viewers, 8 Mbps, the proxy's own CPU | 18.6 % of a core | 16.9 % of a core |
 | Garbage collections in 20 s under that load | 15 | **0** |
 | Viewer joining a running channel (real FFmpeg) | Undecodable first frame, 16 decode errors, about 11 s behind live | First byte after about 1 ms, starts on an I-frame, 0 decode errors |
 | Failover to a backup | 3.2 s freeze | Viewers stay connected |
@@ -167,12 +172,12 @@ Every item below was found in a full review of the codebase. Each fix comes with
 
 ### Crashes that took the whole process down
 
-Go cannot recover from a concurrent map write, so each of these killed Threadfin and every stream with it.
+Go cannot recover from a concurrent map write, so each of these killed the whole process and every stream with it.
 
 - **Overlapping logins:** Plex fetching `/lineup.json` while another client fetched `/xmltv/` was enough. The authentication maps are now locked.
 - **A tune during a playlist refresh:** the refresh runs at 00:00 by default, when recordings often start. Provider settings are now guarded by a read/write lock.
 - **A scheduled refresh overlapping "Update" in the web UI**, or an API update call. Refreshes are now serialised.
-- **The update check:** a missing or unparseable release (for example a fork with no releases) dereferenced a nil version. This happened at startup, so Threadfin never started, or at the daily update time.
+- **The update check:** a missing or unparseable release (for example a fork with no releases) dereferenced a nil version. This happened at startup, so the program never started, or at the daily update time.
 - **Malformed HDHomeRun tuner data** in the maintenance goroutine.
 
 ### Data loss
@@ -180,9 +185,9 @@ Go cannot recover from a concurrent map write, so each of these killed Threadfin
 - **Playlists over 10 MB loaded as zero channels.** A second "optimized" parser dropped every entry. The empty result was saved over the playlist and the cleanup deleted all of its channel mappings. There is now one parser for every size, with its patterns compiled once.
 - **One unreadable playlist silently dropped the next one,** whose mappings were then deleted, and loaded the last one twice.
 - **The PPV endpoints could overwrite `xepg.json` with `null`,** wiping every channel mapping.
-- **A crash or power loss while saving could leave `settings.json` empty,** and Threadfin would not start again.
+- **A crash or power loss while saving could leave `settings.json` empty,** and the program would not start again.
   - Settings, mappings, the user database, playlists and guides are now written to a temporary file and renamed into place.
-- **`threadfin.xml.gz` was always missing up to its last megabyte,** including `</tv>`.
+- **The compressed guide (`.xml.gz`) was always missing up to its last megabyte,** including `</tv>`.
 - **The served playlist and guide could be fetched half-written** during a rebuild. They are now replaced atomically.
 - **Backups:**
   - A missing file ended the backup early but reported success.
@@ -206,9 +211,9 @@ Go cannot recover from a concurrent map write, so each of these killed Threadfin
 
 ### Security hardening
 
-- **Other websites can no longer control Threadfin.** The web interface's websocket accepted connections from any origin. With web authentication off (the default), any page opened by someone on your network could make their browser change Threadfin's settings, including the FFmpeg path and options, which means running commands on the server.
+- **Other websites can no longer control ProxFin.** The web interface's websocket accepted connections from any origin. With web authentication off (the default), any page opened by someone on your network could make their browser change its settings, including the FFmpeg path and options, which means running commands on the server.
   - Requests that change something (the websocket, the API, the PPV endpoints, logins) are now refused when a browser sends them for another website. This uses the browser's `Sec-Fetch-Site` header, or the `Origin` header on older browsers.
-  - It works behind reverse proxies, through `X-Forwarded-Host` or the configured Threadfin domain.
+  - It works behind reverse proxies, through `X-Forwarded-Host` or the configured domain.
   - Plex, Emby, Jellyfin, curl and scripts are not affected.
 - **Password hashes and salts are no longer sent to the web interface.**
 - **Backup restore rejects archive entries that escape the target folder** (zip slip).
@@ -277,37 +282,37 @@ Everything from Threadfin and xTeVe is still here.
 ## Installation
 
 > [!IMPORTANT]
-> The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin and does **not** include these changes. Build the image from this repository.
+> There are no published ProxFin images or release binaries yet. Build from this repository. The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin, not ProxFin.
 >
-> Automatic updates are switched off in this build, so it never replaces itself with an upstream Threadfin release. The *Automatic update* setting has no effect until updates are configured (see [Forks](#forks)).
+> Automatic updates are off until ProxFin publishes releases, so the *Automatic update* setting has no effect yet (see [Releases and updates](#releases-and-updates)).
 
 ### Docker
 
 ```bash
-docker build -t threadfin .
+docker build -t proxfin .
 ```
 
 For NVIDIA hardware transcoding:
 
 ```bash
-docker build --build-arg USE_NVIDIA=1 -t threadfin:nvidia .
+docker build --build-arg USE_NVIDIA=1 -t proxfin:nvidia .
 ```
 
 `docker-compose.yml`:
 
 ```yaml
 services:
-  threadfin:
+  proxfin:
     build: .
-    image: threadfin
-    container_name: threadfin
+    image: proxfin
+    container_name: proxfin
     ports:
       - 34400:34400
     environment:
       - TZ=America/Los_Angeles
     volumes:
-      - ./data/conf:/home/threadfin/conf
-      - ./data/temp:/tmp/threadfin:rw
+      - ./data/conf:/home/proxfin/conf
+      - ./data/temp:/tmp/proxfin:rw
     restart: unless-stopped
 ```
 
@@ -318,37 +323,51 @@ The image includes FFmpeg (`jellyfin-ffmpeg` where available) and VLC. Open `htt
 Requires [Go](https://go.dev) 1.22 or newer.
 
 ```bash
-go build -mod=mod -o threadfin .
+go build -mod=mod -o proxfin .
 ```
 
 ```bash
-./threadfin -port 34400
+./proxfin -port 34400
 ```
 
 | Flag | Description |
 |---|---|
 | `-port` | Web server port (default `34400`) |
-| `-config` | Configuration folder (default `~/.threadfin/`) |
+| `-config` | Configuration folder (default `~/.proxfin/`, or an existing `~/.threadfin/`) |
 | `-bind` | IP address to bind to |
-| `-restore` | Restore a backup: `-restore /path/threadfin_backup.zip` |
+| `-restore` | Restore a backup: `-restore /path/proxfin_backup.zip` (Threadfin backups work too) |
 | `-debug` | Debug level `0`–`3` |
 | `-info` | Show system information and exit |
 | `-dev` | Developer mode: serve the web interface from `html/` and regenerate the embedded copy |
 | `-branch` | Git branch used by the updater |
 
-Threadfin stops its streams and exits cleanly on `SIGINT` or `SIGTERM`.
+ProxFin stops its streams and exits cleanly on `SIGINT` or `SIGTERM`.
+
+| | URL |
+|---|---|
+| Web interface | `http://<host>:34400/web/` |
+| Playlist for Emby / Jellyfin | `http://<host>:34400/m3u/proxfin.m3u` |
+| Guide | `http://<host>:34400/xmltv/proxfin.xml` (or `.xml.gz`) |
+| Plex | Add `<host>:34400` as an HDHomeRun tuner |
 
 ---
 
-## Upgrading from Threadfin
+## Switching from Threadfin
 
-This build uses the same configuration folder and files. Point it at your existing folder (`-config`, or the same Docker volume) and it carries on:
+ProxFin is designed so an existing Threadfin install can switch without setting anything up again. Make a backup first (Settings → Backup) so you can go back.
 
-- Playlists, guides, filters, mappings and users are kept.
-- FFmpeg options still set to the old default are migrated to the new default. Custom options are not touched.
-- Playlists set to the removed "Threadfin" buffer use FFmpeg.
-
-Make a backup first (Settings → Backup) so you can go back.
+- **Your settings folder is used as it is.**
+  - Without `-config`, ProxFin uses `~/.threadfin/` when there is no `~/.proxfin/` yet.
+  - In Docker, keep mounting your volume at `/home/threadfin/conf`, and the container uses it.
+  - `THREADFIN_*` variables in your compose file (port, bind address, debug level, config folder) still apply.
+- **Playlists, guides, filters, mappings and users are kept.** The keys stored in `settings.json` and `xepg.json` are unchanged.
+  - Channels mapped to "Threadfin Dummy" are converted to "ProxFin Dummy" automatically.
+  - Channels without a `tvg-id` keep their generated `threadfin-…` ids, so their mappings and client guides stay matched.
+- **Plex, Emby and Jellyfin keep working.**
+  - The tuner keeps its device ID, and only its displayed name changes to ProxFin.
+  - The old URLs `/m3u/threadfin.m3u` and `/xmltv/threadfin.xml(.gz)` are still served. You can switch your clients to the `proxfin.*` URLs whenever you like.
+- **FFmpeg options still set to the old default are migrated** to the new default. Custom options are not touched. Playlists set to the removed "Threadfin" buffer use FFmpeg.
+- **Threadfin backups can be restored.** New backups are named `proxfin_backup_…zip` and `proxfin_auto_backup_…zip`. Old automatic backups are left where they are.
 
 ---
 
@@ -377,7 +396,7 @@ cd ts && tsc -p tsconfig.json --strict false --alwaysStrict false
 The flags keep the output identical to the committed JavaScript with TypeScript 6. Release builds serve an embedded copy of `html/` from `src/webUI.go`. Regenerate it by starting a build once in developer mode:
 
 ```bash
-go build -mod=mod -o threadfin . && ./threadfin -dev
+go build -mod=mod -o proxfin . && ./proxfin -dev
 ```
 
 ### Tests
@@ -387,10 +406,10 @@ go test -mod=mod -race ./...
 ```
 
 - The buffer's integration tests start real processes, using a fake FFmpeg shell script. `-short` skips them.
-- The load test drives real 8 Mbps FFmpeg streams through the buffer with `curl` viewers, and reports Threadfin's CPU usage:
+- The load test drives real 8 Mbps FFmpeg streams through the buffer with `curl` viewers, and reports ProxFin's CPU usage:
 
 ```bash
-THREADFIN_LOAD_TEST=1 CHANNELS=20 VIEWERS=5 SECONDS=20 go test -mod=mod ./src/ -run TestBufferLoad -v -timeout 10m
+PROXFIN_LOAD_TEST=1 CHANNELS=20 VIEWERS=5 SECONDS=20 go test -mod=mod ./src/ -run TestBufferLoad -v -timeout 10m
 ```
 
 - Benchmarks:
@@ -401,11 +420,12 @@ go test -mod=mod -run '^$' -bench . ./src/internal/streambuf/ ./src/
 
 The `vendor/` folder is out of date, which is why `-mod=mod` is needed.
 
-### Forks
+### Releases and updates
 
-Automatic updates download releases from the repository named by the `GitHub` variable in [`threadfin.go`](threadfin.go). In this build it is still upstream Threadfin, so updates are switched off (`Update: false`).
-
-To turn them on, point `User` and `Repo` at a repository that publishes releases, then set `Update: true`. A test (`threadfin_test.go`) fails if updates are switched on while the variable still points at upstream.
+- **Release builds.** Pushing a version tag such as `2.0.0` runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It builds the binaries (`ProxFin_<os>_<arch>`, the names the updater downloads), pushes Docker images to `<DOCKERHUB_USERNAME>/proxfin`, and creates a GitHub release.
+- **Updates.** Automatic updates download those releases from the repository named by the `GitHub` variable in [`proxfin.go`](proxfin.go), which is `TheEngineer808/ProxFin`. They stay off (`Update: false`) until releases exist.
+- **Forks** should point the variable at their own repository.
+- **Guard test.** `proxfin_test.go` fails if updates are switched on while the variable points at upstream Threadfin, whose releases would replace ProxFin.
 
 ---
 
@@ -428,7 +448,7 @@ This project would not exist without:
 - **[Threadfin](https://github.com/Threadfin/Threadfin)** by [Fyb3roptik](https://github.com/Fyb3roptik) and contributors. It is the codebase this project is built on: the Bootstrap UI, backup channels, filter-group channel numbers, the mapping editor improvements, and years of fixes.
 - **[xTeVe](https://github.com/xteve-project/xTeVe)**, the original M3U proxy that Threadfin was based on. Its [documentation](https://github.com/xteve-project/xTeVe-Documentation/blob/master/en/configuration.md) is still the best guide to configuration.
 
-Please report problems with this build here, not to the Threadfin or xTeVe projects.
+Please report problems with ProxFin [here](https://github.com/TheEngineer808/ProxFin/issues), not to the Threadfin or xTeVe projects.
 
 It also uses:
 - [go-ssdp](https://github.com/koron/go-ssdp)
@@ -443,4 +463,4 @@ It also uses:
 
 ## License
 
-[MIT](LICENSE). The original copyright notice is kept in [`LICENSE`](LICENSE) and must stay with any copy or redistribution.
+[MIT](LICENSE). [`LICENSE`](LICENSE) keeps the copyright notices of xTeVe, Threadfin and ProxFin, and they must stay with any copy or redistribution.

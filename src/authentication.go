@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"threadfin/src/internal/authentication"
+	"proxfin/src/internal/authentication"
 )
 
 func activatedSystemAuthentication() (err error) {

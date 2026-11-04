@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"threadfin/src/internal/streambuf"
+	"proxfin/src/internal/streambuf"
 )
 
 func commandFor(t *testing.T, url string) []string {
