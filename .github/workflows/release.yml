@@ -1,4 +1,4 @@
-name: Threadfin Build
+name: ProxFin Build
 on:
   push:
     tags: "1.*"
@@ -33,22 +33,22 @@ jobs:
           echo "Building all platforms in parallel"
           
           # Linux builds
-          env GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/Threadfin_linux_arm64 &
-          env GOOS=linux GOARCH=arm go build -ldflags="-s -w" -o dist/Threadfin_linux_arm &
-          env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_linux_amd64 &
+          env GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/ProxFin_linux_arm64 &
+          env GOOS=linux GOARCH=arm go build -ldflags="-s -w" -o dist/ProxFin_linux_arm &
+          env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/ProxFin_linux_amd64 &
           # Linux (amd64) build compatible with older glibc (e.g., Debian 11 / glibc 2.31)
-          env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -ldflags="-s -w" -o dist/Threadfin_linux_amd64_glibc_2.31_compat &
+          env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -ldflags="-s -w" -o dist/ProxFin_linux_amd64_glibc_2.31_compat &
           
           # FreeBSD builds
-          env GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_freebsd_amd64 &
-          env GOOS=freebsd GOARCH=arm go build -ldflags="-s -w" -o dist/Threadfin_freebsd_arm &
+          env GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o dist/ProxFin_freebsd_amd64 &
+          env GOOS=freebsd GOARCH=arm go build -ldflags="-s -w" -o dist/ProxFin_freebsd_arm &
           
           # macOS builds
-          env GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/Threadfin_darwin_arm64 &
-          env GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_darwin_amd64 &
+          env GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/ProxFin_darwin_arm64 &
+          env GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/ProxFin_darwin_amd64 &
           
           # Windows build
-          env GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_windows_amd64.exe &
+          env GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/ProxFin_windows_amd64.exe &
           
           # Wait for all background jobs to finish
           wait
@@ -59,7 +59,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: threadfin-binaries
+          name: proxfin-binaries
           path: dist/
           retention-days: 1
 
@@ -94,7 +94,7 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64,linux/arm/v7
-          tags: fyb3roptik/threadfin:latest,fyb3roptik/threadfin:${{ github.ref_name }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/proxfin:latest,${{ secrets.DOCKERHUB_USERNAME }}/proxfin:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -107,7 +107,7 @@ jobs:
             USE_NVIDIA=1
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: fyb3roptik/threadfin:latest-nvidia,fyb3roptik/threadfin:${{ github.ref_name }}-nvidia
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/proxfin:latest-nvidia,${{ secrets.DOCKERHUB_USERNAME }}/proxfin:${{ github.ref_name }}-nvidia
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -119,7 +119,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: threadfin-binaries
+          name: proxfin-binaries
           path: dist
 
       - name: Release

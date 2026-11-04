@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the application with optimizations
-RUN CGO_ENABLED=0 go build -mod=mod -ldflags="-s -w" -trimpath -o threadfin threadfin.go
+RUN CGO_ENABLED=0 go build -mod=mod -ldflags="-s -w" -trimpath -o proxfin .
 
 # Second stage. Creating a minimal image
 # -----------------------------------------------------------------------------
@@ -29,39 +29,33 @@ FROM final${USE_NVIDIA:+-nvidia}
 
 ARG BUILD_DATE
 ARG VCS_REF
-ARG THREADFIN_PORT=34400
-ARG THREADFIN_VERSION
+ARG PROXFIN_PORT=34400
+ARG PROXFIN_VERSION
 
 LABEL org.label-schema.build-date="${BUILD_DATE}" \
-      org.label-schema.name="Threadfin" \
-      org.label-schema.description="Dockerized Threadfin" \
-      org.label-schema.url="https://hub.docker.com/r/fyb3roptik/threadfin/" \
+      org.label-schema.name="ProxFin" \
+      org.label-schema.description="M3U proxy for Plex DVR, Emby and Jellyfin Live TV (based on Threadfin and xTeVe)" \
+      org.label-schema.url="https://github.com/TheEngineer808/ProxFin" \
       org.label-schema.vcs-ref="${VCS_REF}" \
-      org.label-schema.vcs-url="https://github.com/Threadfin/Threadfin" \
-      org.label-schema.vendor="Threadfin" \
-      org.label-schema.version="${THREADFIN_VERSION}" \
-      org.label-schema.schema-version="1.0" \
-      DISCORD_URL="https://discord.gg/bEPPNP2VG8"
+      org.label-schema.vcs-url="https://github.com/TheEngineer808/ProxFin" \
+      org.label-schema.vendor="ProxFin" \
+      org.label-schema.version="${PROXFIN_VERSION}" \
+      org.label-schema.schema-version="1.0"
 
-ENV THREADFIN_BIN=/home/threadfin/bin \
-    THREADFIN_CONF=/home/threadfin/conf \
-    THREADFIN_HOME=/home/threadfin \
-    THREADFIN_TEMP=/tmp/threadfin \
-    THREADFIN_CACHE=/home/threadfin/cache \
-    THREADFIN_UID=31337 \
-    THREADFIN_GID=31337 \
-    THREADFIN_USER=threadfin \
-    THREADFIN_BRANCH=main \
-    THREADFIN_DEBUG=0 \
-    THREADFIN_PORT=34400 \
-    THREADFIN_LOG=/var/log/threadfin.log \
-    THREADFIN_BIND_IP_ADDRESS=0.0.0.0 \
+ENV PROXFIN_BIN=/home/proxfin/bin \
+    PROXFIN_CONF=/home/proxfin/conf \
+    PROXFIN_HOME=/home/proxfin \
+    PROXFIN_TEMP=/tmp/proxfin \
+    PROXFIN_CACHE=/home/proxfin/cache \
+    PROXFIN_DEBUG=0 \
+    PROXFIN_PORT=34400 \
+    PROXFIN_BIND_IP_ADDRESS=0.0.0.0 \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/threadfin/bin \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/proxfin/bin \
     DEBIAN_FRONTEND=noninteractive
 
 # Set working directory
-WORKDIR $THREADFIN_HOME
+WORKDIR $PROXFIN_HOME
 
 # Arguments to add the jellyfin repository
 ARG TARGETARCH
@@ -78,8 +72,8 @@ RUN apt-get update && \
     tzdata \
     gnupg \
     apt-transport-https && \
-    mkdir -p $THREADFIN_BIN $THREADFIN_CONF $THREADFIN_TEMP $THREADFIN_HOME/cache && \
-    chmod a+rwX $THREADFIN_CONF $THREADFIN_TEMP && \
+    mkdir -p $PROXFIN_BIN $PROXFIN_CONF $PROXFIN_TEMP $PROXFIN_HOME/cache && \
+    chmod a+rwX $PROXFIN_CONF $PROXFIN_TEMP && \
     sed -i 's/geteuid/getppid/' /usr/bin/vlc && \
     curl -fsSL https://repo.jellyfin.org/master/ubuntu/jellyfin_team.gpg.key \
         | gpg --dearmor -o /etc/apt/trusted.gpg.d/ubuntu-jellyfin.gpg && \
@@ -97,13 +91,15 @@ RUN apt-get update && \
     rm -rf /var/cache/apt/archives* /var/lib/apt/lists/*
 
 # Copy built binary from builder image
-COPY --from=builder /app/threadfin $THREADFIN_BIN/
-RUN chmod +rx $THREADFIN_BIN/threadfin
+COPY --from=builder /app/proxfin $PROXFIN_BIN/
+COPY docker-entrypoint.sh /usr/local/bin/proxfin-entrypoint
+RUN chmod +rx $PROXFIN_BIN/proxfin /usr/local/bin/proxfin-entrypoint
 
 # Configure container volume mappings
-VOLUME $THREADFIN_CONF
-VOLUME $THREADFIN_TEMP
+VOLUME $PROXFIN_CONF
+VOLUME $PROXFIN_TEMP
 
-EXPOSE $THREADFIN_PORT
+EXPOSE $PROXFIN_PORT
 
-ENTRYPOINT ["sh", "-c", "${THREADFIN_BIN}/threadfin -port=${THREADFIN_PORT} -bind=${THREADFIN_BIND_IP_ADDRESS} -config=${THREADFIN_CONF} -debug=${THREADFIN_DEBUG}"]
+# Uses /home/threadfin/conf instead when a Threadfin volume is mounted there
+ENTRYPOINT ["/usr/local/bin/proxfin-entrypoint"]

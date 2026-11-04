@@ -1,6 +1,8 @@
 
+proxfin
 threadfin
 vendor/
 .DS_Store
+proxfin.exe
 threadfin.exe
 .idea/**

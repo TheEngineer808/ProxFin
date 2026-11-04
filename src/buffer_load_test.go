@@ -23,10 +23,10 @@ import (
 // 8 Mbps MPEG-TS (ffmpeg replaying a sample in real time), each watched by
 // VIEWERS clients (curl processes, so only Threadfin's own CPU is measured).
 //
-//	THREADFIN_LOAD_TEST=1 CHANNELS=20 VIEWERS=5 SECONDS=20 WARMUP=40 go test -mod=mod ./src/ -run TestBufferLoad -v -timeout 10m
+//	PROXFIN_LOAD_TEST=1 CHANNELS=20 VIEWERS=5 SECONDS=20 WARMUP=40 go test -mod=mod ./src/ -run TestBufferLoad -v -timeout 10m
 func TestBufferLoad(t *testing.T) {
-	if os.Getenv("THREADFIN_LOAD_TEST") == "" {
-		t.Skip("set THREADFIN_LOAD_TEST=1 to run the load test")
+	if os.Getenv("PROXFIN_LOAD_TEST") == "" {
+		t.Skip("set PROXFIN_LOAD_TEST=1 to run the load test")
 	}
 	channels, viewers := envInt("CHANNELS", 20), envInt("VIEWERS", 5)
 	seconds := envInt("SECONDS", 20)

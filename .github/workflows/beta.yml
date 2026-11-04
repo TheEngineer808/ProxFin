@@ -1,4 +1,4 @@
-name: Threadfin Beta Build
+name: ProxFin Beta Build
 on:
   push:
     branches:
@@ -18,9 +18,9 @@ jobs:
       - name: Set up and Build
         uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: '1.23'
         id: go
       - run: |
          go mod tidy && go mod vendor
          echo "Building Linux"
-         env GOOS=linux GOARCH=amd64 go build -o dist/Threadfin_linux_amd64
+         env GOOS=linux GOARCH=amd64 go build -o dist/ProxFin_linux_amd64
