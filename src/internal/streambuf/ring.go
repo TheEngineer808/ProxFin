@@ -36,9 +36,21 @@ type ring struct {
 	maxBytes int
 	maxAge   time.Duration
 
-	// Closed and replaced whenever a chunk is appended or the ring is
-	// closed, waking every waiting viewer at once.
-	notify chan struct{}
+	// Closed when a chunk is appended or the ring is closed, waking the
+	// viewers waiting for new data; replaced only once a viewer took it,
+	// so appends nobody waits for allocate nothing.
+	notify     chan struct{}
+	notifyUsed bool
+
+	// The same for viewers that already hold part of a batch (they wait for
+	// it to fill up or for its delay to pass): closed only once batchBytes
+	// were appended since it was made. Waking them on every chunk instead
+	// (ffmpeg writes every frame separately) cost most of the CPU of a
+	// channel with many viewers.
+	batch        chan struct{}
+	batchUsed    bool
+	batchBytes   int
+	batchPending int
 
 	closed bool
 	err    error
@@ -46,8 +58,16 @@ type ring struct {
 	firstData time.Time // arrival of the first chunk ever
 }
 
-func newRing(maxBytes int, maxAge time.Duration) *ring {
-	return &ring{maxBytes: maxBytes, maxAge: maxAge, notify: make(chan struct{})}
+// newRing creates a ring that keeps up to maxBytes and maxAge of data and
+// wakes viewers holding part of a batch once batchBytes arrived.
+func newRing(maxBytes int, maxAge time.Duration, batchBytes int) *ring {
+	return &ring{
+		maxBytes:   maxBytes,
+		maxAge:     maxAge,
+		notify:     make(chan struct{}),
+		batch:      make(chan struct{}),
+		batchBytes: batchBytes,
+	}
 }
 
 func (r *ring) append(c *chunk) {
@@ -77,8 +97,33 @@ func (r *ring) append(c *chunk) {
 		r.first++
 	}
 
-	close(r.notify)
-	r.notify = make(chan struct{})
+	if r.notifyUsed {
+		close(r.notify)
+		r.notify = make(chan struct{})
+		r.notifyUsed = false
+	}
+	if r.batchPending += len(c.data); r.batchPending >= r.batchBytes {
+		r.batchPending = 0
+		if r.batchUsed {
+			close(r.batch)
+			r.batch = make(chan struct{})
+			r.batchUsed = false
+		}
+	}
+}
+
+// waitNew returns the channel closed when the next chunk arrives. It needs
+// r.mu held.
+func (r *ring) waitNew() <-chan struct{} {
+	r.notifyUsed = true
+	return r.notify
+}
+
+// waitBatch returns the channel closed once batchBytes more data arrived.
+// It needs r.mu held.
+func (r *ring) waitBatch() <-chan struct{} {
+	r.batchUsed = true
+	return r.batch
 }
 
 func (r *ring) close(err error) {
@@ -91,6 +136,7 @@ func (r *ring) close(err error) {
 	r.closed = true
 	r.err = err
 	close(r.notify)
+	close(r.batch)
 }
 
 type readResult int
@@ -103,8 +149,11 @@ const (
 )
 
 // read appends up to max chunks from position *seq to dst and advances *seq.
-// Each returned chunk is retained for the caller, who must release it.
-func (r *ring) read(seq *uint64, max int, dst []*chunk) ([]*chunk, <-chan struct{}, readResult, error) {
+// Each returned chunk is retained for the caller, who must release it. With
+// nothing new, the returned channel wakes the caller when the next chunk
+// arrives, or with holding set (the caller already holds part of a batch)
+// once a batch's worth of data arrived.
+func (r *ring) read(seq *uint64, max int, dst []*chunk, holding bool) ([]*chunk, <-chan struct{}, readResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -117,7 +166,10 @@ func (r *ring) read(seq *uint64, max int, dst []*chunk) ([]*chunk, <-chan struct
 		if r.closed {
 			return dst, nil, readClosed, r.err
 		}
-		return dst, r.notify, readWait, nil
+		if holding {
+			return dst, r.waitBatch(), readWait, nil
+		}
+		return dst, r.waitNew(), readWait, nil
 	}
 
 	if avail > max {
@@ -159,7 +211,7 @@ func (r *ring) join(prebuffer int, maxWait time.Duration, live bool, now time.Ti
 		if r.closed {
 			return joinPoint{}, nil, false, r.err
 		}
-		return joinPoint{}, r.notify, false, nil
+		return joinPoint{}, r.waitNew(), false, nil
 	}
 
 	if live {
@@ -194,7 +246,7 @@ func (r *ring) join(prebuffer int, maxWait time.Duration, live bool, now time.Ti
 			// No join point in the buffer: start at the newest chunk.
 			best = byBytes
 		case !waited && !r.closed:
-			return joinPoint{}, r.notify, false, nil
+			return joinPoint{}, r.waitNew(), false, nil
 		case oldest >= 0:
 			best = oldest // as much cushion as there is, from a clean start
 		case byBytes >= 0:

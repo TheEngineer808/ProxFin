@@ -10,7 +10,7 @@ import (
 func BenchmarkChunkAppend(b *testing.B) {
 	out := make([]byte, 7*tsPacketSize*10) // a 13 KB read
 	ins := newInspector()
-	r := newRing(64*len(out), time.Hour) // holds 64 chunks
+	r := newRing(64*len(out), time.Hour, 64<<10) // holds 64 chunks
 	now := time.Now()
 	poisonReleased = false // as in production
 	defer func() { poisonReleased = true }()

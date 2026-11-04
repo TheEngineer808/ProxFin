@@ -481,7 +481,7 @@ func newSession(m *Manager, key string, req Request) *session {
 		m:      m,
 		key:    key,
 		req:    req,
-		ring:   newRing(maxBytes, cfg.Retention),
+		ring:   newRing(maxBytes, cfg.Retention, cfg.CoalesceBytes),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -844,7 +844,7 @@ func (v *Viewer) Next(ctx context.Context) ([][]byte, error) {
 	var oldest time.Time
 
 	for {
-		chunks, wait, res, err := v.s.ring.read(&v.seq, maxBatch-len(out), v.scratch[:0])
+		chunks, wait, res, err := v.s.ring.read(&v.seq, maxBatch-len(out), v.scratch[:0], len(out) > 0)
 		v.scratch = chunks[:0]
 
 		if len(chunks) > 0 {
@@ -922,8 +922,9 @@ func (v *Viewer) Next(ctx context.Context) ([][]byte, error) {
 			select {
 			case <-wait:
 			case <-v.after(d):
-				v.out = out
-				return out, nil
+				// Due: take what arrived while waiting (only a full
+				// batch wakes this wait early), then return.
+				continue
 			case <-ctx.Done():
 				v.out = out
 				return out, ctx.Err()

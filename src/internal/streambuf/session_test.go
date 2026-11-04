@@ -888,3 +888,37 @@ func TestShutdownTimesOutOnAProcessThatDoesNotExit(t *testing.T) {
 		t.Errorf("Shutdown once the process ended: %v", err)
 	}
 }
+
+// At the live position, a viewer's data is sent in batches of whatever
+// arrived within CoalesceDelay (or CoalesceBytes of it, whichever comes
+// first), so it can be written with few system calls.
+func TestLiveViewerGetsCoalescedBatches(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {rate: 10 * time.Millisecond}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Prebuffer = 0
+	cfg.CoalesceDelay = 100 * time.Millisecond
+	v, err := m.Join(context.Background(), request(l, cfg, src("P", "a")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	readFor(t, v, 300*time.Millisecond) // the start-up burst
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	batches, pieces := 0, 0
+	for {
+		bufs, err := v.Next(ctx)
+		if err != nil {
+			break
+		}
+		batches++
+		pieces += len(bufs)
+	}
+	// A frame every 10 ms: about 10 per batch, 10 batches a second.
+	t.Logf("%d batches, %.1f frames per batch", batches, float64(pieces)/float64(batches))
+	if batches > 14 || float64(pieces)/float64(batches) < 6 {
+		t.Fatalf("%d batches of %.1f frames in 1 s, want about 10 of 10", batches, float64(pieces)/float64(batches))
+	}
+}
