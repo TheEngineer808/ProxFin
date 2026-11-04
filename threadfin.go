@@ -31,7 +31,12 @@ type GitHubStruct struct {
 
 // GitHub : GitHub Account
 // If you want to fork this project, enter your Github account here. This prevents a newer version of Threadfin from updating your version.
-var GitHub = GitHubStruct{Branch: "Main", User: "Threadfin", Repo: "Threadfin", Update: true}
+//
+// Automatic updates are off: they download releases from this repository,
+// which is still upstream Threadfin, and a newer upstream release would
+// replace this build. Point User/Repo at this project's own repository
+// (which must publish releases) before turning them back on.
+var GitHub = GitHubStruct{Branch: "Main", User: "Threadfin", Repo: "Threadfin", Update: false}
 
 /*
 	Branch: GitHub Branch

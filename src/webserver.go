@@ -439,8 +439,13 @@ func WS(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		// Pages of other websites must not be able to use the web
+		// interface's websocket (see crossSiteRequest).
 		CheckOrigin: func(r *http.Request) bool {
-			// Implement any custom origin validation logic here, if needed.
+			if crossSiteRequest(r) {
+				showWarning(1103)
+				return false
+			}
 			return true
 		},
 	}
@@ -514,7 +519,8 @@ func WS(w http.ResponseWriter, r *http.Request) {
 				}
 
 				response.Token = newToken
-				response.Users, _ = authentication.GetAllUserData()
+				users, _ := authentication.GetAllUserData()
+				response.Users = usersForBrowser(users)
 
 			}
 
@@ -778,6 +784,12 @@ func Web(w http.ResponseWriter, r *http.Request) {
 			var username, password, confirm string
 			switch r.Method {
 			case "POST":
+				// Logins and the first user must come from Threadfin's own
+				// pages, not from a form on another website.
+				if refuseCrossSite(w, r) {
+					return
+				}
+
 				var allUserData, _ = authentication.GetAllUserData()
 
 				username = r.FormValue("username")
@@ -952,6 +964,10 @@ func API(w http.ResponseWriter, r *http.Request) {
 			  "version.threadfin": "1.3.0"
 			}
 	*/
+
+	if refuseCrossSite(w, r) {
+		return
+	}
 
 	if Settings.HttpThreadfinDomain != "" {
 		setGlobalDomain(getBaseUrl(Settings.HttpThreadfinDomain, Settings.Port))
@@ -1192,7 +1208,8 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 
 	if data == true {
 
-		defaults.Users, _ = authentication.GetAllUserData()
+		users, _ := authentication.GetAllUserData()
+		defaults.Users = usersForBrowser(users)
 		//defaults.DVR = System.DVRAddress
 
 		if Settings.EpgSource == "XEPG" {
@@ -1230,10 +1247,16 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 }
 
 func enablePPV(w http.ResponseWriter, r *http.Request) {
+	if refuseCrossSite(w, r) {
+		return
+	}
 	setPPVChannelsActive(w, true)
 }
 
 func disablePPV(w http.ResponseWriter, r *http.Request) {
+	if refuseCrossSite(w, r) {
+		return
+	}
 	setPPVChannelsActive(w, false)
 }
 
