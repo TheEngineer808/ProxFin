@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"os"
@@ -231,7 +232,62 @@ func checkConditions(streamValues, conditions, coType string) (status bool) {
 }
 
 // Threadfin M3U Datei erstellen
+
+// buildM3U returns the playlist of the given groups, or of all channels
+// if groups is empty. The full playlist is also saved as threadfin.m3u, as
+// before; it used to be returned empty in that case, so a request for the
+// playlist with any query parameter (e.g. the username and password of M3U
+// authentication) but no group-title got an empty response.
 func buildM3U(groups []string) (m3u string, err error) {
+
+	var content strings.Builder
+
+	if len(groups) == 0 {
+		err = saveM3UFile(&content)
+	} else {
+		err = writeM3U(&content, groups)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	return content.String(), nil
+}
+
+// saveM3UFile writes the playlist of all channels to threadfin.m3u, and to
+// copyTo if it isn't nil.
+func saveM3UFile(copyTo io.Writer) (err error) {
+
+	filename := System.Folder.Data + "threadfin.m3u"
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriterSize(file, 1<<20) // 1MB buffer
+
+	var out io.Writer = writer
+	if copyTo != nil {
+		out = io.MultiWriter(writer, copyTo)
+	}
+
+	if err = writeM3U(out, nil); err != nil {
+		return err
+	}
+
+	if err = writer.Flush(); err != nil {
+		return err
+	}
+
+	return file.Close()
+}
+
+// writeM3U writes the playlist of the given groups (all if empty) to w.
+// Building the playlist of some groups by string concatenation was
+// quadratic: 20,000 channels took 35 s.
+func writeM3U(w io.Writer, groups []string) (err error) {
 
 	var imgc = Data.Cache.Images
 	// Preserve every active channel as a distinct entry by iteration order, not keyed by number
@@ -303,22 +359,8 @@ func buildM3U(groups []string) (m3u string, err error) {
 	}
 	header := fmt.Sprintf(`#EXTM3U url-tvg="%s" x-tvg-url="%s"`+"\n", xmltvURL, xmltvURL)
 
-	// If generating the full file, stream to disk to avoid huge in-memory strings
-	var writer *bufio.Writer
-	var file *os.File
-	if len(groups) == 0 {
-		filename := System.Folder.Data + "threadfin.m3u"
-		file, err = os.Create(filename)
-		if err != nil {
-			return "", err
-		}
-		defer file.Close()
-		writer = bufio.NewWriterSize(file, 1<<20) // 1MB buffer
-		if _, err = writer.WriteString(header); err != nil {
-			return "", err
-		}
-	} else {
-		m3u = header
+	if _, err = io.WriteString(w, header); err != nil {
+		return err
 	}
 
 	// Sort entries by tvg-chno numerically
@@ -401,28 +443,18 @@ func buildM3U(groups []string) (m3u string, err error) {
 				continue
 			}
 			seenURLInGroup[key] = struct{}{}
-			if writer != nil {
-				if _, err = writer.WriteString(parameter); err != nil {
-					return "", err
-				}
-				if _, err = writer.WriteString(stream + "\n"); err != nil {
-					return "", err
-				}
-			} else {
-				m3u = m3u + parameter + stream + "\n"
+			if _, err = io.WriteString(w, parameter); err != nil {
+				return err
+			}
+			if _, err = io.WriteString(w, stream+"\n"); err != nil {
+				return err
 			}
 			emittedGroupCount[group] = emittedGroupCount[group] + 1
 		}
 
 	}
 
-	if writer != nil {
-		if err = writer.Flush(); err != nil {
-			return "", err
-		}
-	}
-
-	return
+	return nil
 }
 
 func probeChannel(request RequestStruct) (string, string, string, error) {

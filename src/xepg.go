@@ -1860,7 +1860,7 @@ func (m *uuidMatcher) find(fileID, uuid string) (XEPGChannelStruct, bool) {
 func createM3UFile() {
 
 	showInfo("XEPG:" + fmt.Sprintf("Create M3U file (%s)", System.File.M3U))
-	_, err := buildM3U([]string{})
+	err := saveM3UFile(nil)
 	if err != nil {
 		ShowError(err, 000)
 	}

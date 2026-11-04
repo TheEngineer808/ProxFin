@@ -16,14 +16,24 @@ import (
 
 // usePipelineFolders points the files and caches the playlist/EPG pipeline
 // uses at a temporary folder and restores them when the test ends.
+//
+// (The tests using it are in xepg_* files so that they run after the
+// buffer tests, whose streams linger for a moment and read the globals.)
 func usePipelineFolders(t testing.TB) string {
 	t.Helper()
 
-	savedSystemFolder, savedSystemFile, savedGZ, savedInfo := System.Folder, System.File, System.Compressed.GZxml, System.Flag.Info
+	// The log is silenced; System.Flag.Info is only written if needed, as
+	// lingering goroutines of other tests read it.
+	if !System.Flag.Info {
+		System.Flag.Info = true
+		t.Cleanup(func() { System.Flag.Info = false })
+	}
+
+	savedSystemFolder, savedSystemFile, savedGZ := System.Folder, System.File, System.Compressed.GZxml
 	savedImages, savedXMLTVCache := Data.Cache.Images, Data.Cache.XMLTV
 	savedXEPG, savedXMLTV, savedStreams, savedFilter := Data.XEPG, Data.XMLTV, Data.Streams, Data.Filter
 	t.Cleanup(func() {
-		System.Folder, System.File, System.Compressed.GZxml, System.Flag.Info = savedSystemFolder, savedSystemFile, savedGZ, savedInfo
+		System.Folder, System.File, System.Compressed.GZxml = savedSystemFolder, savedSystemFile, savedGZ
 		Data.Cache.Images, Data.Cache.XMLTV = savedImages, savedXMLTVCache
 		Data.XEPG, Data.XMLTV, Data.Streams, Data.Filter = savedXEPG, savedXMLTV, savedStreams, savedFilter
 		programIndexMu.Lock()
@@ -32,7 +42,6 @@ func usePipelineFolders(t testing.TB) string {
 	})
 
 	dir := t.TempDir()
-	System.Flag.Info = true
 	System.Folder.Data = dir + string(os.PathSeparator)
 	System.Folder.ImagesCache = filepath.Join(dir, "images") + string(os.PathSeparator)
 	if err := os.MkdirAll(System.Folder.ImagesCache, 0755); err != nil {
@@ -297,7 +306,7 @@ func benchmarkProgramData(b *testing.B, get func(XEPGChannelStruct) (XMLTV, erro
 		clearXMLTVCache()
 		Data.Cache.Images, Data.Cache.XMLTV, Settings.Filter, System.Flag.Info = savedImages, savedCache, savedFilter, savedInfo
 	})
-	System.Flag.Info = true
+	System.Flag.Info = true // benchmarks run alone
 	Data.Cache.Images = images
 	clearXMLTVCache()
 	Settings.Filter = map[int64]interface{}{}
