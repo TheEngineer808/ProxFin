@@ -172,7 +172,11 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	tuners   map[string]int // playlist ID -> tuners in use
-	freed    chan struct{}  // closed and replaced when a tuner is released
+
+	// Closed and replaced when a tuner may have become available: one was
+	// released, or a stream lost its last viewer (a lingering stream gives
+	// its tuner to a new channel). Joins waiting for a tuner look again.
+	tunerChange chan struct{}
 }
 
 // NewManager creates an empty manager.
@@ -181,7 +185,7 @@ func NewManager(log Logger) *Manager {
 		log:      log,
 		sessions: map[string]*session{},
 		tuners:   map[string]int{},
-		freed:    make(chan struct{}),
+		tunerChange: make(chan struct{}),
 	}
 }
 
@@ -247,7 +251,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 			return v, nil
 		}
 
-		freed := m.freed
+		changed := m.tunerChange
 		m.mu.Unlock()
 
 		remaining := time.Until(deadline)
@@ -256,7 +260,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 		}
 		timer := time.NewTimer(remaining)
 		select {
-		case <-freed:
+		case <-changed:
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
@@ -305,8 +309,13 @@ func (m *Manager) releaseTunerLocked(s *session) {
 		delete(m.tuners, s.tunerPlaylist)
 	}
 	s.tunerPlaylist = ""
-	close(m.freed)
-	m.freed = make(chan struct{})
+	m.tunerChangedLocked()
+}
+
+// tunerChangedLocked wakes the joins waiting for a tuner.
+func (m *Manager) tunerChangedLocked() {
+	close(m.tunerChange)
+	m.tunerChange = make(chan struct{})
 }
 
 // moveTuner makes the session hold a tuner of the source's playlist,
@@ -346,6 +355,13 @@ func (m *Manager) viewerLeft(s *session) {
 		m.stopLocked(s)
 		return
 	}
+
+	// The stream now lingers, and a new channel may take its tuner. A
+	// client that opened the new channel before closing this one is
+	// waiting for exactly that: let it look again now rather than at the
+	// end of its TunerWait.
+	m.tunerChangedLocked()
+
 	s.lingerTimer = time.AfterFunc(linger, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()

@@ -430,6 +430,42 @@ func TestTunerWaitCoversChannelSwitchOverlap(t *testing.T) {
 	}
 }
 
+// With the default linger, the old channel keeps its tuner after its last
+// viewer leaves. A new channel waiting for that tuner must get it as soon
+// as the old channel is closed, not when its own TunerWait runs out (it
+// used to wait the full TunerWait on every such channel switch).
+func TestChannelSwitchOverlapDoesNotWaitOutTunerWait(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Linger = 5 * time.Second
+	cfg.TunerWait = 2 * time.Second
+	a, b := src("P", "a"), src("P", "b")
+	a.TunerLimit, b.TunerLimit = 1, 1
+
+	old, err := m.Join(context.Background(), request(l, cfg, a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		old.Close()
+	}()
+
+	start := time.Now()
+	v, err := m.Join(context.Background(), request(l, cfg, b))
+	if err != nil {
+		t.Fatalf("new channel refused: %v", err)
+	}
+	defer v.Close()
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("new channel waited %v for the tuner the old one left 50ms in", d)
+	}
+	if st := m.Stats(); st.Streams != 1 {
+		t.Fatalf("%d streams running, want only the new channel", st.Streams)
+	}
+}
+
 func TestBackupOnAnotherPlaylistUsesThatPlaylistsTuner(t *testing.T) {
 	l := newFakeLauncher(map[string]behaviour{
 		"p": {failNow: true, exitErr: errors.New("HTTP 503")},
