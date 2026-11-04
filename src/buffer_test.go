@@ -45,7 +45,7 @@ var (
 
 // setupBufferTest configures the globals once for all buffer tests. Every
 // test uses its own stream URLs.
-func setupBufferTest(t *testing.T) {
+func setupBufferTest(t testing.TB) {
 	t.Helper()
 
 	if testing.Short() {
@@ -527,5 +527,45 @@ func TestTunerLimitVideoDropsAStuckClient(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("still writing to a client that accepts no data")
+	}
+}
+
+// Cost of a client connecting to a running channel and leaving again
+// (Plex probes each channel and reconnects at once). Run with -benchmem.
+func BenchmarkBufferViewerConnect(b *testing.B) {
+	setupBufferTest(b)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bufferingStream(testPlaylistID, "stream?"+b.Name(), nil, nil, nil, "bench", w, r)
+	}))
+	defer srv.Close()
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
+
+	get := func(ctx context.Context, n int64) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.CopyN(io.Discard, resp.Body, n)
+		resp.Body.Close()
+	}
+
+	// One viewer keeps the channel running.
+	ctx, cancel := context.WithCancel(context.Background())
+	running := make(chan struct{})
+	go func() {
+		defer close(running)
+		get(ctx, 1<<40)
+	}()
+	defer func() { cancel(); <-running }()
+	for streamManager.Stats().Viewers == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		get(context.Background(), 64<<10)
 	}
 }

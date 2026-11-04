@@ -168,6 +168,14 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 	streamToClient(viewer, w, r)
 }
 
+// Write buffers of streamWriteSize, shared by all connections: a client
+// that connects and leaves again (Plex probes every channel) does not
+// cost a fresh 256 KB.
+var streamWriteBufs = sync.Pool{New: func() any {
+	b := make([]byte, streamWriteSize)
+	return &b
+}}
+
 func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rc := http.NewResponseController(w)
@@ -192,7 +200,9 @@ func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request)
 
 	// The pieces of each batch are combined into few large writes: each
 	// write through the HTTP connection costs several system calls.
-	wbuf := make([]byte, 0, streamWriteSize)
+	pooled := streamWriteBufs.Get().(*[]byte)
+	defer streamWriteBufs.Put(pooled)
+	wbuf := (*pooled)[:0]
 	write := func(b []byte) bool {
 		_, err := w.Write(b)
 		return err == nil

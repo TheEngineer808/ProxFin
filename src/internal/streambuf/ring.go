@@ -10,7 +10,8 @@ import (
 // Its memory is pooled and reference counted (see pool.go).
 type chunk struct {
 	data  []byte
-	class int // pool size class of data
+	buf   *[]byte // pool buffer holding data (nil if not pooled)
+	class int     // its pool size class
 	refs  refs
 	seq   uint64
 	at    time.Time

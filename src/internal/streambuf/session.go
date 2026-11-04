@@ -645,8 +645,8 @@ func (s *session) attempt(src Source) (streamed time.Duration, err error) {
 // makeChunk copies output from the packetizer into a pooled chunk (held by
 // the ring once appended) and finds its first join point.
 func makeChunk(out []byte, mode packetizerMode, ins *inspector, at time.Time) *chunk {
-	data, class := newChunkData(out)
-	c := &chunk{data: data, class: class, at: at, join: -1}
+	data, buf, class := newChunkData(out)
+	c := &chunk{data: data, buf: buf, class: class, at: at, join: -1}
 	c.refs.n.Store(1)
 
 	if mode != modeTS {
