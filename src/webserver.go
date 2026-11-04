@@ -423,6 +423,22 @@ func DataImages(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// wsRefreshCommands are the web UI commands that refresh provider data or
+// rebuild the databases (see refreshMutex).
+var wsRefreshCommands = map[string]bool{
+	"saveSettings":     true,
+	"saveFilesM3U":     true,
+	"updateFileM3U":    true,
+	"saveFilesHDHR":    true,
+	"updateFileHDHR":   true,
+	"saveFilesXMLTV":   true,
+	"updateFileXMLTV":  true,
+	"saveFilter":       true,
+	"saveEpgMapping":   true,
+	"saveWizard":       true,
+	"ThreadfinRestore": true,
+}
+
 var (
 	wsMaxMessageSize int64 = 256 << 20
 	wsReadTimeout          = 5 * time.Minute
@@ -463,6 +479,8 @@ func WS(w http.ResponseWriter, r *http.Request) {
 	// restore) and don't hold the socket for a client that never sends.
 	conn.SetReadLimit(wsMaxMessageSize)
 	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+
+	var refreshLocked bool
 
 	systemMutex.Lock()
 	if Settings.HttpThreadfinDomain != "" {
@@ -519,6 +537,14 @@ func WS(w http.ResponseWriter, r *http.Request) {
 
 		}
 		systemMutex.Unlock()
+
+		// Commands that refresh provider data or rebuild the databases wait
+		// for a scheduled update (or another such command) to finish.
+		if wsRefreshCommands[request.Cmd] && !refreshLocked {
+			refreshMutex.Lock()
+			refreshLocked = true
+			defer refreshMutex.Unlock()
+		}
 
 		switch request.Cmd {
 		// Data read commands
@@ -1030,6 +1056,11 @@ func API(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	if strings.HasPrefix(request.Cmd, "update.") {
+		refreshMutex.Lock()
+		defer refreshMutex.Unlock()
+	}
+
 	switch request.Cmd {
 	case "login": // Muss nichts übergeben werden
 
@@ -1225,6 +1256,9 @@ func disablePPV(w http.ResponseWriter, r *http.Request) {
 // the PPV dummy guide. If xepg.json can't be read it stops: saving the
 // empty result used to replace every channel mapping with "null".
 func setPPVChannelsActive(w http.ResponseWriter, active bool) {
+
+	refreshMutex.Lock()
+	defer refreshMutex.Unlock()
 
 	var fail = func(err error) {
 		var response APIResponseStruct

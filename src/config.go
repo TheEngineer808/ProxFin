@@ -30,6 +30,13 @@ var (
 	xepgMutex   sync.Mutex
 	logMutex    sync.Mutex
 	systemMutex sync.Mutex
+
+	// refreshMutex serialises refreshing the provider files and rebuilding
+	// the databases from them. The scheduled update, the web UI and the API
+	// all run this pipeline, which writes the same maps (Settings.Files,
+	// Data.Streams, Data.XEPG); two runs at once crashed the process with
+	// "concurrent map writes". Only the entry points take it.
+	refreshMutex sync.Mutex
 )
 
 // Init : Systeminitialisierung
