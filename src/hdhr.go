@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"sync"
 )
 
 func makeInteraceFromHDHR(content []byte, playlistName, id string) (channels []interface{}, err error) {
@@ -16,14 +17,26 @@ func makeInteraceFromHDHR(content []byte, playlistName, id string) (channels []i
 
 		for _, d := range hdhrData {
 
+			// Skip malformed entries instead of panicking (this runs in the
+			// maintenance goroutine, where a panic ends the process).
+			data, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			guideName, ok1 := data["GuideName"].(string)
+			url, ok2 := data["URL"].(string)
+			guideNumber, ok3 := data["GuideNumber"].(string)
+			if !ok1 || !ok2 || !ok3 {
+				continue
+			}
+
 			var channel = make(map[string]string)
-			var data = d.(map[string]interface{})
 
 			channel["group-title"] = playlistName
-			channel["name"] = data["GuideName"].(string)
-			channel["tvg-id"] = data["GuideName"].(string)
-			channel["url"] = data["URL"].(string)
-			channel["ID-"+id] = data["GuideNumber"].(string)
+			channel["name"] = guideName
+			channel["tvg-id"] = guideName
+			channel["url"] = url
+			channel["ID-"+id] = guideNumber
 			channel["_uuid.key"] = "ID-" + id
 			channel["_values"] = playlistName + " " + channel["name"]
 
@@ -102,7 +115,14 @@ func getLineupStatus() (jsonContent []byte, err error) {
 	return
 }
 
+// lineupMutex serialises building the lineup: Plex and the XEPG build can
+// request it at the same time, and the PMS guide numbers below are shared.
+var lineupMutex sync.Mutex
+
 func getLineup() (jsonContent []byte, err error) {
+
+	lineupMutex.Lock()
+	defer lineupMutex.Unlock()
 
 	var lineup Lineup
 
@@ -174,18 +194,43 @@ func getLineup() (jsonContent []byte, err error) {
 
 	jsonContent, err = json.MarshalIndent(lineup, "", "  ")
 
+	// New guide numbers are saved once per lineup, not once per channel.
+	if pmsGuideNumbers.dirty {
+		if errSave := saveMapToJSONFile(System.File.PMS, Data.Cache.PMS); errSave != nil {
+			ShowError(errSave, 0)
+		}
+	}
+
 	Data.Cache.PMS = nil
+	pmsGuideNumbers.used = nil
 
 	saveStreamingURLs()
 
 	return
 }
 
+// pmsGuideNumbers tracks the guide numbers in Data.Cache.PMS while a
+// lineup is built (lineupMutex held).
+var pmsGuideNumbers struct {
+	used  map[string]bool // ids in use
+	next  int             // every id below id-<next> is in use
+	dirty bool            // new ids to save
+}
+
+// getGuideNumberPMS returns the stable guide number of a channel without
+// one (EPG source PMS), assigning the smallest free "id-N" to new channels.
+// It used to rebuild the list of all ids for every candidate number and
+// save the whole file for every new channel: O(n³) per lineup request
+// (2000 new channels took 104 s). Within one lineup ids are only added, so
+// the smallest free id never decreases and a cursor finds it in O(1).
 func getGuideNumberPMS(channelName string) (pmsID string, err error) {
 
-	if len(Data.Cache.PMS) == 0 {
+	if pmsGuideNumbers.used == nil {
 
 		Data.Cache.PMS = make(map[string]string)
+		pmsGuideNumbers.used = make(map[string]bool)
+		pmsGuideNumbers.next = 0
+		pmsGuideNumbers.dirty = false
 
 		pms, err := loadJSONFileToMap(System.File.PMS)
 
@@ -194,43 +239,29 @@ func getGuideNumberPMS(channelName string) (pmsID string, err error) {
 		}
 
 		for key, value := range pms {
-			Data.Cache.PMS[key] = value.(string)
+			if id, ok := value.(string); ok {
+				Data.Cache.PMS[key] = id
+				pmsGuideNumbers.used[id] = true
+			}
 		}
 
-	}
-
-	var getNewID = func(channelName string) (id string) {
-
-		var i int
-
-	newID:
-
-		var ids []string
-		id = fmt.Sprintf("id-%d", i)
-
-		for _, v := range Data.Cache.PMS {
-			ids = append(ids, v)
-		}
-
-		if indexOfString(id, ids) != -1 {
-			i++
-			goto newID
-		}
-
-		return
 	}
 
 	if value, ok := Data.Cache.PMS[channelName]; ok {
-
-		pmsID = value
-
-	} else {
-
-		pmsID = getNewID(channelName)
-		Data.Cache.PMS[channelName] = pmsID
-		saveMapToJSONFile(System.File.PMS, Data.Cache.PMS)
-
+		return value, nil
 	}
+
+	for {
+		pmsID = fmt.Sprintf("id-%d", pmsGuideNumbers.next)
+		pmsGuideNumbers.next++
+		if !pmsGuideNumbers.used[pmsID] {
+			break
+		}
+	}
+
+	Data.Cache.PMS[channelName] = pmsID
+	pmsGuideNumbers.used[pmsID] = true
+	pmsGuideNumbers.dirty = true
 
 	return
 }
