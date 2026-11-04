@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"threadfin/src/internal/streambuf"
@@ -274,26 +275,53 @@ func streamHEAD(w http.ResponseWriter, r *http.Request, url string) {
 	}
 }
 
+// How long one write of the "tuner limit reached" clip may take: a client
+// that accepts no data (gone without closing the connection) is dropped
+// instead of holding the request until TCP gives up, many minutes later.
+var tunerLimitWriteTimeout = 10 * time.Second
+
+var (
+	tunerLimitClipMu sync.Mutex
+	tunerLimitClip   []byte
+)
+
+// tunerLimitVideo returns the "tuner limit reached" clip, decoded once
+// (nil if it is not available).
+func tunerLimitVideo() []byte {
+	tunerLimitClipMu.Lock()
+	defer tunerLimitClipMu.Unlock()
+	if tunerLimitClip == nil {
+		if value, ok := webUI["html/video/stream-limit.ts"].(string); ok {
+			tunerLimitClip = []byte(GetHTMLString(value))
+		}
+	}
+	return tunerLimitClip
+}
+
 // sendTunerLimitVideo plays the "tuner limit reached" clip for 30 seconds.
 func sendTunerLimitVideo(w http.ResponseWriter, r *http.Request) {
-	value, ok := webUI["html/video/stream-limit.ts"]
-	if !ok {
+	content := tunerLimitVideo()
+	if content == nil {
 		http.Error(w, "All tuners are in use", http.StatusServiceUnavailable)
 		return
 	}
 
-	content := []byte(GetHTMLString(value.(string)))
 	w.Header().Set("Content-Type", "video/mpeg")
 	w.WriteHeader(http.StatusOK)
 
+	rc := http.NewResponseController(w)
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+
 	for i := 1; i < 60; i++ {
+		rc.SetWriteDeadline(time.Now().Add(tunerLimitWriteTimeout))
 		if _, err := w.Write(content); err != nil {
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-tick.C:
 		}
 	}
 }

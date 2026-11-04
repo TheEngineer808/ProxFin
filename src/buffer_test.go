@@ -3,6 +3,7 @@ package src
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -471,5 +472,60 @@ func TestStreamHEADIsBounded(t *testing.T) {
 
 	if rec, _ := head(context.Background(), "/ok"); rec.Code != http.StatusOK || rec.Header().Get("X-Provider") != "yes" {
 		t.Errorf("provider headers not passed on: %d %v", rec.Code, rec.Header())
+	}
+}
+
+// stuckWriter is a client that accepts no data: a write blocks until the
+// write deadline (if one is set) passes.
+type stuckWriter struct {
+	header   http.Header
+	mu       sync.Mutex
+	deadline time.Time
+	writes   int
+}
+
+func (w *stuckWriter) Header() http.Header { return w.header }
+func (w *stuckWriter) WriteHeader(int)     {}
+
+func (w *stuckWriter) SetWriteDeadline(t time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadline = t
+	return nil
+}
+
+func (w *stuckWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	deadline := w.deadline
+	w.mu.Unlock()
+	if w.writes == 1 {
+		return len(b), nil // the first one fits in the socket buffers
+	}
+	if deadline.IsZero() {
+		select {} // blocks forever, as on a dead connection without a deadline
+	}
+	time.Sleep(time.Until(deadline))
+	return 0, errors.New("i/o timeout")
+}
+
+// The tuner-limit clip is sent with a write deadline: a client that
+// accepts no data does not hold the request until TCP gives up.
+func TestTunerLimitVideoDropsAStuckClient(t *testing.T) {
+	setupBufferTest(t)
+	old := tunerLimitWriteTimeout
+	tunerLimitWriteTimeout = 200 * time.Millisecond
+	defer func() { tunerLimitWriteTimeout = old }()
+
+	w := &stuckWriter{header: http.Header{}}
+	done := make(chan struct{})
+	go func() {
+		sendTunerLimitVideo(w, httptest.NewRequest(http.MethodGet, "/stream/x", nil))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("still writing to a client that accepts no data")
 	}
 }
