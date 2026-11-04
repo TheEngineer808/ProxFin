@@ -481,7 +481,7 @@
     },
     "bufferSize": {
       "title": "Buffer Size",
-      "description": "Buffer size in MB.<br>M3U8: If the TS segment smaller then the buffer size, the file size of the segment is used."
+      "description": "Video each client receives at once when it starts watching a channel: a cushion against network hiccups. Larger values make playback more robust on unstable connections. A channel that is just starting waits at most 3 seconds to collect it."
     },
     "storeBufferInRAM":
     {
@@ -535,7 +535,7 @@
     },
     "bufferTimeout": {
       "title": "Timeout for new client connections",
-      "description": "The Threadfin buffer waits until new client connections are established. Helpful for fast channel switching. Value in milliseconds.",
+      "description": "When all tuners of a playlist are in use, how long a new channel waits for one to become free, for example when a client opens the new channel before closing the old one (at least 2 seconds). Value in milliseconds.",
       "placeholder": "100"
     },
     "userAgent": {
