@@ -985,7 +985,6 @@ func createXMLTVFile() (err error) {
 	}
 	defer xmlFile.Close()
 	writer := bufio.NewWriterSize(xmlFile, 1<<20) // 1MB buffer
-	defer writer.Flush()
 
 	var xepgXML XMLTV
 
@@ -1093,6 +1092,16 @@ func createXMLTVFile() (err error) {
 
 	// Close tv root
 	if _, err = writer.WriteString("</tv>\n"); err != nil {
+		return err
+	}
+
+	// The file must be complete before it is compressed. The buffer used to
+	// be flushed only when the function returned, after compressing, so the
+	// .gz file lacked up to the last 1 MB, including </tv>.
+	if err = writer.Flush(); err != nil {
+		return err
+	}
+	if err = xmlFile.Close(); err != nil {
 		return err
 	}
 
