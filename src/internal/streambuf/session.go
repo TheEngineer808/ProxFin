@@ -165,7 +165,9 @@ func (l Logger) error(err error) {
 }
 
 // Manager owns every running stream and the tuner counts. All bookkeeping
-// happens under its single mutex; the data path does not touch it.
+// happens under its single mutex; the data path does not touch it. Nothing
+// is logged while it is held: a log write that blocks (a stalled stdout)
+// must not stop every tune and the web interface's counts with it.
 type Manager struct {
 	log Logger
 
@@ -237,7 +239,12 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 			return v, nil
 		}
 
-		if m.tuners[primary.PlaylistID] < primary.TunerLimit || m.evictLingeringLocked(primary.PlaylistID) {
+		free := m.tuners[primary.PlaylistID] < primary.TunerLimit
+		var evicted *session
+		if !free {
+			evicted = m.evictLingeringLocked(primary.PlaylistID)
+		}
+		if free || evicted != nil {
 			s := newSession(m, key, req)
 			m.sessions[key] = s
 			m.tuners[primary.PlaylistID]++
@@ -246,6 +253,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 			v := s.addViewerLocked()
 			m.mu.Unlock()
 
+			m.logEvicted(evicted)
 			m.log.info("Streaming Status:Playlist: %s - Tuner: %d / %d", primary.PlaylistName, used, primary.TunerLimit)
 			go s.run()
 			return v, nil
@@ -272,16 +280,22 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 }
 
 // evictLingeringLocked stops a stream of the playlist that has no viewers,
-// freeing its tuner. It reports whether one was found.
-func (m *Manager) evictLingeringLocked(playlistID string) bool {
+// freeing its tuner. It returns that stream, or nil if there is none; the
+// caller logs it with logEvicted once the lock is released.
+func (m *Manager) evictLingeringLocked(playlistID string) *session {
 	for _, s := range m.sessions {
 		if s.tunerPlaylist == playlistID && s.viewers == 0 {
-			m.log.debug("Streaming Status:Channel: %s - giving its tuner to a new channel", s.req.Channel)
 			m.stopLocked(s)
-			return true
+			return s
 		}
 	}
-	return false
+	return nil
+}
+
+func (m *Manager) logEvicted(s *session) {
+	if s != nil {
+		m.log.debug("Streaming Status:Channel: %s - giving its tuner to a new channel", s.req.Channel)
+	}
 }
 
 // stopLocked marks the session as ended: it leaves the map (new viewers of
@@ -322,30 +336,42 @@ func (m *Manager) tunerChangedLocked() {
 // giving back the one it holds now. It reports false if none is free.
 func (m *Manager) moveTuner(s *session, src Source) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	ok, evicted := m.moveTunerLocked(s, src)
+	m.mu.Unlock()
 
+	m.logEvicted(evicted)
+	return ok
+}
+
+func (m *Manager) moveTunerLocked(s *session, src Source) (ok bool, evicted *session) {
 	if s.closing {
-		return false
+		return false, nil
 	}
 	if s.tunerPlaylist == src.PlaylistID {
-		return true
+		return true, nil
 	}
-	if m.tuners[src.PlaylistID] >= src.TunerLimit && !m.evictLingeringLocked(src.PlaylistID) {
-		return false
+	if m.tuners[src.PlaylistID] >= src.TunerLimit {
+		if evicted = m.evictLingeringLocked(src.PlaylistID); evicted == nil {
+			return false, nil
+		}
 	}
 	m.releaseTunerLocked(s)
 	m.tuners[src.PlaylistID]++
 	s.tunerPlaylist = src.PlaylistID
-	return true
+	return true, evicted
 }
 
 func (m *Manager) viewerLeft(s *session) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	s.viewers--
-	m.log.info("Streaming Status:Channel: %s (Clients: %d)", s.req.Channel, s.viewers)
+	n := s.viewers
+	m.viewerLeftLocked(s)
+	m.mu.Unlock()
 
+	m.log.info("Streaming Status:Channel: %s (Clients: %d)", s.req.Channel, n)
+}
+
+func (m *Manager) viewerLeftLocked(s *session) {
 	if s.viewers > 0 || s.closing {
 		return
 	}

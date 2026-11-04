@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -463,6 +464,59 @@ func TestChannelSwitchOverlapDoesNotWaitOutTunerWait(t *testing.T) {
 	}
 	if st := m.Stats(); st.Streams != 1 {
 		t.Fatalf("%d streams running, want only the new channel", st.Streams)
+	}
+}
+
+// A log write that blocks (a stalled stdout) must not hold the manager's
+// lock: tunes and the web interface's counts go on.
+func TestBlockedLoggerDoesNotStallTheManager(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}})
+	block := make(chan struct{})
+	var blocking atomic.Bool
+	m := NewManager(Logger{Info: func(string) {
+		if blocking.Load() {
+			<-block
+		}
+	}})
+	cfg := testConfig()
+	a, b := src("P", "a"), src("P", "b")
+	a.TunerLimit, b.TunerLimit = 1, 1
+
+	v, err := m.Join(context.Background(), request(l, cfg, a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking.Store(true)
+	go v.Close() // logs the new client count, and blocks there
+
+	// Takes the lingering tuner, then blocks in its own log write.
+	joined := make(chan *Viewer, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cfg := cfg
+		cfg.TunerWait = time.Second
+		v, _ := m.Join(context.Background(), request(l, cfg, b))
+		joined <- v
+	}()
+
+	stats := make(chan Stats, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		stats <- m.Stats()
+	}()
+	select {
+	case st := <-stats:
+		if st.Streams != 1 || st.Viewers != 1 {
+			t.Errorf("stats %+v, want the new channel running with one viewer", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("the manager is stuck while a log write blocks")
+	}
+
+	blocking.Store(false)
+	close(block)
+	if v := <-joined; v != nil {
+		v.Close()
 	}
 }
 
