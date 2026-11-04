@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"os"
@@ -38,41 +39,39 @@ func parsePlaylist(filename, fileType string) (channels []interface{}, err error
 	return
 }
 
-// Streams filtern
-func filterThisStream(s interface{}) (status bool, liveEvent bool) {
+// Patterns for the conditions of a filter rule: "!{...}" (exclude) and
+// "{...}" (include).
+var (
+	filterExcludePattern = regexp.MustCompile(`!+[{]+[^.]+[}]`)
+	filterIncludePattern = regexp.MustCompile(`[{]+[^.]+[}]`)
+)
 
-	status = false
-	var stream = s.(map[string]string)
-	var regexpYES = `[{]+[^.]+[}]`
-	var regexpNO = `!+[{]+[^.]+[}]`
+// preparedFilter is a filter rule split into its parts once per build.
+// The rule used to be parsed, and both patterns compiled, for every stream
+// and every filter.
+type preparedFilter struct {
+	caseSensitive bool
+	liveEvent     bool
+	filterType    string
+	rule          string
+	exclude       string
+	include       string
+}
 
-	liveEvent = false
+func prepareFilters(filters []Filter) (prepared []preparedFilter) {
 
-	for _, filter := range Data.Filter {
+	prepared = make([]preparedFilter, 0, len(filters))
+
+	for _, filter := range filters {
 
 		if filter.Rule == "" {
 			continue
 		}
 
-		liveEvent = filter.LiveEvent
-
-		var group, name, search string
 		var exclude, include string
-		var match = false
-
-		var streamValues = strings.Replace(stream["_values"], "\r", "", -1)
-
-		if v, ok := stream["group-title"]; ok {
-			group = v
-		}
-
-		if v, ok := stream["name"]; ok {
-			name = v
-		}
 
 		// Unerwünschte Streams !{DEU}
-		r := regexp.MustCompile(regexpNO)
-		val := r.FindStringSubmatch(filter.Rule)
+		val := filterExcludePattern.FindStringSubmatch(filter.Rule)
 
 		if len(val) == 1 {
 
@@ -83,8 +82,7 @@ func filterThisStream(s interface{}) (status bool, liveEvent bool) {
 		}
 
 		// Muss zusätzlich erfüllt sein {DEU}
-		r = regexp.MustCompile(regexpYES)
-		val = r.FindStringSubmatch(filter.Rule)
+		val = filterIncludePattern.FindStringSubmatch(filter.Rule)
 
 		if len(val) == 1 {
 
@@ -94,47 +92,93 @@ func filterThisStream(s interface{}) (status bool, liveEvent bool) {
 
 		}
 
-		switch filter.CaseSensitive {
-
-		case false:
-
-			streamValues = strings.ToLower(streamValues)
+		if !filter.CaseSensitive {
 			filter.Rule = strings.ToLower(filter.Rule)
 			exclude = strings.ToLower(exclude)
 			include = strings.ToLower(include)
-			group = strings.ToLower(group)
-			name = strings.ToLower(name)
-
 		}
 
-		switch filter.Type {
+		prepared = append(prepared, preparedFilter{
+			caseSensitive: filter.CaseSensitive,
+			liveEvent:     filter.LiveEvent,
+			filterType:    filter.Type,
+			rule:          filter.Rule,
+			exclude:       exclude,
+			include:       include,
+		})
+
+	}
+
+	return
+}
+
+// Streams filtern
+func filterThisStream(s interface{}) (status bool, liveEvent bool) {
+	return matchStream(s.(map[string]string), prepareFilters(Data.Filter))
+}
+
+// matchStream reports whether the stream passes the filters, and the live
+// event setting of the filter that decided (of the last filter if none
+// matched).
+func matchStream(stream map[string]string, filters []preparedFilter) (status bool, liveEvent bool) {
+
+	if len(filters) == 0 {
+		return false, false
+	}
+
+	var group = stream["group-title"]
+	var name = stream["name"]
+	var streamValues = strings.Replace(stream["_values"], "\r", "", -1)
+
+	// lower-case variants, computed once when a filter needs them
+	var lowered bool
+	var lowerGroup, lowerName, lowerValues string
+
+	for _, filter := range filters {
+
+		liveEvent = filter.liveEvent
+
+		var g, n, v = group, name, streamValues
+
+		if !filter.caseSensitive {
+			if !lowered {
+				lowerGroup = strings.ToLower(group)
+				lowerName = strings.ToLower(name)
+				lowerValues = strings.ToLower(streamValues)
+				lowered = true
+			}
+			g, n, v = lowerGroup, lowerName, lowerValues
+		}
+
+		var search string
+		var match = false
+
+		switch filter.filterType {
 
 		case "group-title":
-			search = name
+			search = n
 
-			if group == filter.Rule {
+			if g == filter.rule {
 				match = true
 			}
 
 		case "custom-filter":
-			search = streamValues
-			if strings.Contains(search, filter.Rule) {
+			search = v
+			if strings.Contains(search, filter.rule) {
 				match = true
 			}
 		}
 
-		if match == true {
+		if match {
 
-			if len(exclude) > 0 {
-				var status = checkConditions(search, exclude, "exclude")
-				if status == false {
+			if len(filter.exclude) > 0 {
+				if !checkConditions(search, filter.exclude, "exclude") {
 					return false, liveEvent
 				}
 			}
 
-			if len(include) > 0 {
-				var status = checkConditions(search, include, "include")
-				if status == false {
+			if len(filter.include) > 0 {
+				if !checkConditions(search, filter.include, "include") {
 					return false, liveEvent
 				}
 			}
@@ -188,7 +232,62 @@ func checkConditions(streamValues, conditions, coType string) (status bool) {
 }
 
 // Threadfin M3U Datei erstellen
+
+// buildM3U returns the playlist of the given groups, or of all channels
+// if groups is empty. The full playlist is also saved as threadfin.m3u, as
+// before; it used to be returned empty in that case, so a request for the
+// playlist with any query parameter (e.g. the username and password of M3U
+// authentication) but no group-title got an empty response.
 func buildM3U(groups []string) (m3u string, err error) {
+
+	var content strings.Builder
+
+	if len(groups) == 0 {
+		err = saveM3UFile(&content)
+	} else {
+		err = writeM3U(&content, groups)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	return content.String(), nil
+}
+
+// saveM3UFile writes the playlist of all channels to threadfin.m3u, and to
+// copyTo if it isn't nil.
+func saveM3UFile(copyTo io.Writer) (err error) {
+
+	filename := System.Folder.Data + "threadfin.m3u"
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriterSize(file, 1<<20) // 1MB buffer
+
+	var out io.Writer = writer
+	if copyTo != nil {
+		out = io.MultiWriter(writer, copyTo)
+	}
+
+	if err = writeM3U(out, nil); err != nil {
+		return err
+	}
+
+	if err = writer.Flush(); err != nil {
+		return err
+	}
+
+	return file.Close()
+}
+
+// writeM3U writes the playlist of the given groups (all if empty) to w.
+// Building the playlist of some groups by string concatenation was
+// quadratic: 20,000 channels took 35 s.
+func writeM3U(w io.Writer, groups []string) (err error) {
 
 	var imgc = Data.Cache.Images
 	// Preserve every active channel as a distinct entry by iteration order, not keyed by number
@@ -260,22 +359,8 @@ func buildM3U(groups []string) (m3u string, err error) {
 	}
 	header := fmt.Sprintf(`#EXTM3U url-tvg="%s" x-tvg-url="%s"`+"\n", xmltvURL, xmltvURL)
 
-	// If generating the full file, stream to disk to avoid huge in-memory strings
-	var writer *bufio.Writer
-	var file *os.File
-	if len(groups) == 0 {
-		filename := System.Folder.Data + "threadfin.m3u"
-		file, err = os.Create(filename)
-		if err != nil {
-			return "", err
-		}
-		defer file.Close()
-		writer = bufio.NewWriterSize(file, 1<<20) // 1MB buffer
-		if _, err = writer.WriteString(header); err != nil {
-			return "", err
-		}
-	} else {
-		m3u = header
+	if _, err = io.WriteString(w, header); err != nil {
+		return err
 	}
 
 	// Sort entries by tvg-chno numerically
@@ -358,28 +443,18 @@ func buildM3U(groups []string) (m3u string, err error) {
 				continue
 			}
 			seenURLInGroup[key] = struct{}{}
-			if writer != nil {
-				if _, err = writer.WriteString(parameter); err != nil {
-					return "", err
-				}
-				if _, err = writer.WriteString(stream + "\n"); err != nil {
-					return "", err
-				}
-			} else {
-				m3u = m3u + parameter + stream + "\n"
+			if _, err = io.WriteString(w, parameter); err != nil {
+				return err
+			}
+			if _, err = io.WriteString(w, stream+"\n"); err != nil {
+				return err
 			}
 			emittedGroupCount[group] = emittedGroupCount[group] + 1
 		}
 
 	}
 
-	if writer != nil {
-		if err = writer.Flush(); err != nil {
-			return "", err
-		}
-	}
-
-	return
+	return nil
 }
 
 func probeChannel(request RequestStruct) (string, string, string, error) {
