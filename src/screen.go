@@ -6,13 +6,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 func showInfo(str string) {
-	infoMutex.Lock()
-	defer infoMutex.Unlock()
 
 	if System.Flag.Info == true {
 		return
@@ -35,9 +32,7 @@ func showInfo(str string) {
 
 		printLogOnScreen(logMsg, "info")
 
-		logMsg = strings.Replace(logMsg, " ", "&nbsp;", -1)
-		WebScreenLog.Log = append(WebScreenLog.Log, time.Now().Format("2006-01-02 15:04:05")+" "+logMsg)
-		logCleanUp()
+		appendWebLog(strings.Replace(logMsg, " ", "&nbsp;", -1))
 
 	}
 
@@ -54,7 +49,6 @@ func showDebug(str string, level int) {
 	var msg = strings.SplitN(str, ":", 2)
 	var length = len(msg[0])
 	var space string
-	var mutex = sync.RWMutex{}
 
 	if len(msg) == 2 {
 
@@ -67,11 +61,7 @@ func showDebug(str string, level int) {
 
 		printLogOnScreen(logMsg, "debug")
 
-		mutex.Lock()
-		logMsg = strings.Replace(logMsg, " ", "&nbsp;", -1)
-		WebScreenLog.Log = append(WebScreenLog.Log, time.Now().Format("2006-01-02 15:04:05")+" "+logMsg)
-		logCleanUp()
-		mutex.Unlock()
+		appendWebLog(strings.Replace(logMsg, " ", "&nbsp;", -1))
 
 	}
 
@@ -120,14 +110,9 @@ func showWarning(errCode int) {
 
 	var errMsg = getErrMsg(errCode)
 	var logMsg = fmt.Sprintf("[%s] [WARNING] %s", System.Name, errMsg)
-	var mutex = sync.RWMutex{}
 
 	printLogOnScreen(logMsg, "warning")
-
-	mutex.Lock()
-	WebScreenLog.Log = append(WebScreenLog.Log, time.Now().Format("2006-01-02 15:04:05")+" "+logMsg)
-	WebScreenLog.Warnings++
-	mutex.Unlock()
+	appendWebLog(logMsg)
 
 	return
 }
@@ -135,17 +120,11 @@ func showWarning(errCode int) {
 // ShowError : Zeigt die Fehlermeldungen in der Konsole
 func ShowError(err error, errCode int) {
 
-	var mutex = sync.RWMutex{}
-
 	var errMsg = getErrMsg(errCode)
 	var logMsg = fmt.Sprintf("[%s] [ERROR] %s (%s) - EC: %d", System.Name, err, errMsg, errCode)
 
 	printLogOnScreen(logMsg, "error")
-
-	mutex.Lock()
-	WebScreenLog.Log = append(WebScreenLog.Log, time.Now().Format("2006-01-02 15:04:05")+" "+logMsg)
-	WebScreenLog.Errors++
-	mutex.Unlock()
+	appendWebLog(logMsg)
 
 	return
 }
@@ -187,41 +166,64 @@ func printLogOnScreen(logMsg string, logType string) {
 
 }
 
-func logCleanUp() {
+// appendWebLog adds an entry to the log shown in the web interface. Every
+// writer goes through here, under logMutex: the log is appended to from
+// many goroutines (streams, refreshes, HTTP handlers) at once.
+func appendWebLog(logMsg string) {
 	logMutex.Lock()
 	defer logMutex.Unlock()
 
-	var logEntriesRAM = Settings.LogEntriesRAM
-	var logs = WebScreenLog.Log
+	var entry = time.Now().Format("2006-01-02 15:04:05") + " " + logMsg
+	WebScreenLog.Log = append(WebScreenLog.Log, entry)
+	countWebLogEntry(entry, 1)
 
-	WebScreenLog.Warnings = 0
+	// Keep the newest LogEntriesRAM entries, moving them to the front of the
+	// same backing array so it never grows.
+	var max = Settings.LogEntriesRAM
+	if max <= 0 {
+		max = 500
+	}
+
+	if excess := len(WebScreenLog.Log) - max; excess > 0 {
+		for _, old := range WebScreenLog.Log[:excess] {
+			countWebLogEntry(old, -1)
+		}
+		n := copy(WebScreenLog.Log, WebScreenLog.Log[excess:])
+		clear(WebScreenLog.Log[n:]) // release the dropped strings
+		WebScreenLog.Log = WebScreenLog.Log[:n]
+	}
+}
+
+// countWebLogEntry keeps the warning and error counters in step with the
+// entries in the log (d = 1 when adding an entry, -1 when dropping one).
+func countWebLogEntry(entry string, d int) {
+	if strings.Contains(entry, "WARNING") {
+		WebScreenLog.Warnings += d
+	}
+	if strings.Contains(entry, "ERROR") {
+		WebScreenLog.Errors += d
+	}
+}
+
+// resetWebLog empties the log shown in the web interface.
+func resetWebLog() {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	WebScreenLog.Log = make([]string, 0)
 	WebScreenLog.Errors = 0
+	WebScreenLog.Warnings = 0
+}
 
-	if len(logs) > logEntriesRAM {
+// webLogSnapshot returns a copy of the log for the web interface, safe to
+// encode while new entries are being added.
+func webLogSnapshot() WebScreenLogStruct {
+	logMutex.Lock()
+	defer logMutex.Unlock()
 
-		var tmp = make([]string, 0)
-		for i := len(logs) - logEntriesRAM; i < logEntriesRAM; i++ {
-			tmp = append(tmp, logs[i])
-		}
-
-		logs = tmp
-	}
-
-	for _, log := range logs {
-
-		if strings.Contains(log, "WARNING") {
-			WebScreenLog.Warnings++
-		}
-
-		if strings.Contains(log, "ERROR") {
-			WebScreenLog.Errors++
-		}
-
-	}
-
-	WebScreenLog.Log = logs
-
-	return
+	var snapshot = WebScreenLog
+	snapshot.Log = append([]string(nil), WebScreenLog.Log...)
+	return snapshot
 }
 
 // Fehlercodes

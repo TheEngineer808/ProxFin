@@ -28,7 +28,6 @@ var SystemFiles = []string{"authentication.json", "pms.json", "settings.json", "
 
 var (
 	xepgMutex   sync.Mutex
-	infoMutex   sync.Mutex
 	logMutex    sync.Mutex
 	systemMutex sync.Mutex
 )

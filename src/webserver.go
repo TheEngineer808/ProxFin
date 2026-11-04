@@ -574,9 +574,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "resetLogs":
-			WebScreenLog.Log = make([]string, 0)
-			WebScreenLog.Errors = 0
-			WebScreenLog.Warnings = 0
+			resetWebLog()
 			response.OpenMenu = strconv.Itoa(indexOfString("log", System.WEB.Menu))
 
 		case "ThreadfinBackup":
@@ -587,9 +585,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "ThreadfinRestore":
-			WebScreenLog.Log = make([]string, 0)
-			WebScreenLog.Errors = 0
-			WebScreenLog.Warnings = 0
+			resetWebLog()
 
 			if len(request.Base64) > 0 {
 				newWebURL, err := ThreadfinRestoreFromWeb(request.Base64)
@@ -1109,14 +1105,15 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 	defaults.ClientInfo.OS = System.OS
 	defaults.ClientInfo.Streams = fmt.Sprintf("%d / %d", len(Data.Streams.Active), len(Data.Streams.All))
 	defaults.ClientInfo.UUID = Settings.UUID
-	defaults.ClientInfo.Errors = WebScreenLog.Errors
-	defaults.ClientInfo.Warnings = WebScreenLog.Warnings
+	var webLog = webLogSnapshot()
+	defaults.ClientInfo.Errors = webLog.Errors
+	defaults.ClientInfo.Warnings = webLog.Warnings
 	defaults.ClientInfo.ActiveClients = getActiveClientCount()
 	defaults.ClientInfo.ActivePlaylist = getActivePlaylistCount()
 	defaults.ClientInfo.TotalClients = Settings.Tuner
 	defaults.ClientInfo.TotalPlaylist = totalPlaylistCount
 	defaults.Notification = System.Notification
-	defaults.Log = WebScreenLog
+	defaults.Log = webLog
 
 	switch System.Branch {
 
