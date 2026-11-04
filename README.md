@@ -282,11 +282,21 @@ Everything from Threadfin and xTeVe is still here.
 ## Installation
 
 > [!IMPORTANT]
-> There are no published ProxFin images or release binaries yet. Build from this repository. The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin, not ProxFin.
+> Docker images and binaries are published with each [GitHub release](https://github.com/TheEngineer808/ProxFin/releases) once a version tag has been pushed. Until the first release exists, build from this repository. The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin, not ProxFin.
 >
 > Automatic updates are off until ProxFin publishes releases, so the *Automatic update* setting has no effect yet (see [Releases and updates](#releases-and-updates)).
 
 ### Docker
+
+Pull a released image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/theengineer808/proxfin:latest
+```
+
+Tags: `latest`, `<version>` (for example `2.0.0`), and `latest-nvidia` / `<version>-nvidia` for NVIDIA hardware transcoding. Images are built for `linux/amd64`, `linux/arm64` and `linux/arm/v7` (NVIDIA: amd64 and arm64). Each release also has a `proxfin-docker-amd64.tar.gz` attachment for use without a registry: `gunzip -c proxfin-docker-amd64.tar.gz | docker load`.
+
+Or build it yourself:
 
 ```bash
 docker build -t proxfin .
@@ -303,8 +313,9 @@ docker build --build-arg USE_NVIDIA=1 -t proxfin:nvidia .
 ```yaml
 services:
   proxfin:
-    build: .
-    image: proxfin
+    image: ghcr.io/theengineer808/proxfin:latest
+    # or build from this repository instead:
+    # build: .
     container_name: proxfin
     ports:
       - 34400:34400
@@ -422,7 +433,7 @@ The `vendor/` folder is out of date, which is why `-mod=mod` is needed.
 
 ### Releases and updates
 
-- **Release builds.** Pushing a version tag such as `2.0.0` runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It builds the binaries (`ProxFin_<os>_<arch>`, the names the updater downloads), pushes Docker images to `<DOCKERHUB_USERNAME>/proxfin`, and creates a GitHub release.
+- **Release builds.** Pushing a version tag such as `2.0.0` runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It builds the binaries (`ProxFin_<os>_<arch>`, the names the updater downloads), pushes Docker images to `ghcr.io/theengineer808/proxfin` (no extra secrets needed), and creates a GitHub release with the binaries and a `proxfin-docker-amd64.tar.gz` image file attached.
 - **Updates.** Automatic updates download those releases from the repository named by the `GitHub` variable in [`proxfin.go`](proxfin.go), which is `TheEngineer808/ProxFin`. They stay off (`Update: false`) until releases exist.
 - **Forks** should point the variable at their own repository.
 - **Guard test.** `proxfin_test.go` fails if updates are switched on while the variable points at upstream Threadfin, whose releases would replace ProxFin.

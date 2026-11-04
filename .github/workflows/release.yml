@@ -79,36 +79,111 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
 
-      - name: Login to Docker Hub
+      # Images go to GitHub Container Registry, which needs no extra secrets
+      # (the workflow's own GITHUB_TOKEN is enough) and is linked to this
+      # repository. The metadata action lowercases the image name, which
+      # GHCR requires.
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker Build and Push (Standard)
-        uses: docker/build-push-action@v5
+      - name: Image tags (standard)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=latest
+
+      - name: Image tags (NVIDIA)
+        id: meta-nvidia
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-nvidia
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=latest
+
+      # Build the amd64 image once and keep it as a file so it can be
+      # attached to the GitHub release too (for people who cannot or do not
+      # want to use a registry: gunzip -c proxfin-docker-amd64.tar.gz | docker load).
+      - name: Build amd64 image for the release download
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/proxfin:latest,${{ secrets.DOCKERHUB_USERNAME }}/proxfin:${{ github.ref_name }}
+          build-args: |
+            PROXFIN_VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
+          load: true
+          platforms: linux/amd64
+          tags: proxfin:release
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Docker Build and Push (NVIDIA)
-        uses: docker/build-push-action@v5
+      - name: Smoke test the image
+        run: |
+          docker run -d --name proxfin-test -p 34400:34400 proxfin:release
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://localhost:34400/web/; then
+              echo "ProxFin answered on attempt $i"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs proxfin-test
+          echo "ProxFin did not answer on :34400/web/" >&2
+          exit 1
+
+      - name: Save image as a release file
+        run: |
+          mkdir -p image
+          docker save proxfin:release | gzip > image/proxfin-docker-amd64.tar.gz
+          ls -lh image/
+
+      - name: Upload image file
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxfin-docker-image
+          path: image/
+          retention-days: 1
+
+      - name: Push multi-arch image (standard)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PROXFIN_VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
+          push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push multi-arch image (NVIDIA)
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           build-args: |
             USE_NVIDIA=1
+            PROXFIN_VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/proxfin:latest-nvidia,${{ secrets.DOCKERHUB_USERNAME }}/proxfin:${{ github.ref_name }}-nvidia
+          tags: ${{ steps.meta-nvidia.outputs.tags }}
+          labels: ${{ steps.meta-nvidia.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -117,14 +192,47 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build, docker]
     steps:
-      - name: Download build artifacts
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
           name: proxfin-binaries
           path: dist
 
+      - name: Download Docker image file
+        uses: actions/download-artifact@v4
+        with:
+          name: proxfin-docker-image
+          path: dist
+
+      - name: Write release description
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          cat > release-body.md <<EOF
+          ## Docker
+
+          \`\`\`bash
+          docker pull ${image}:${GITHUB_REF_NAME}
+          \`\`\`
+
+          | Image | Platforms |
+          |---|---|
+          | \`${image}:${GITHUB_REF_NAME}\` (also \`:latest\`) | linux/amd64, linux/arm64, linux/arm/v7 |
+          | \`${image}:${GITHUB_REF_NAME}-nvidia\` (also \`:latest-nvidia\`) | linux/amd64, linux/arm64, for NVIDIA hardware transcoding |
+
+          No registry? Download \`proxfin-docker-amd64.tar.gz\` below and run
+          \`gunzip -c proxfin-docker-amd64.tar.gz | docker load\`. That loads the image as \`proxfin:release\`.
+
+          Run it with \`docker run -d -p 34400:34400 -v "\$(pwd)/data/conf:/home/proxfin/conf" ${image}:${GITHUB_REF_NAME}\`,
+          then open \`http://<host>:34400/web/\`.
+
+          ## Binaries
+
+          Standalone builds for Linux, Windows, macOS and FreeBSD are attached below.
+          EOF
+
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: release-body.md
           generate_release_notes: true
