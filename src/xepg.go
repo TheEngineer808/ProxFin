@@ -1,12 +1,14 @@
 package src
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"regexp"
@@ -26,20 +28,85 @@ import (
 // Provider XMLTV Datei überprüfen
 func checkXMLCompatibility(id string, body []byte) (err error) {
 
-	var xmltv XMLTV
 	var compatibility = make(map[string]int)
 
-	err = xml.Unmarshal(body, &xmltv)
+	channels, programs, err := countXMLTV(bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 
-	compatibility["xmltv.channels"] = len(xmltv.Channel)
-	compatibility["xmltv.programs"] = len(xmltv.Program)
+	compatibility["xmltv.channels"] = channels
+	compatibility["xmltv.programs"] = programs
 
 	setProviderCompatibility(id, "xmltv", compatibility)
 
 	return
+}
+
+// countXMLTV checks an XMLTV file as xml.Unmarshal into an XMLTV does (the
+// same errors), but decodes and counts its channels and programmes one at
+// a time instead of keeping all of them: unmarshalling a downloaded guide
+// only to count it used to need about 4 times its size in memory.
+func countXMLTV(r io.Reader) (channels, programs int, err error) {
+
+	var decoder = xml.NewDecoder(r)
+
+	// the root element
+	var root xml.StartElement
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return 0, 0, err
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			root = start
+			break
+		}
+	}
+
+	if root.Name.Local != "tv" {
+		return 0, 0, errors.New("expected element type <tv> but have <" + root.Name.Local + ">")
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return 0, 0, err
+		}
+
+		switch t := token.(type) {
+
+		case xml.StartElement:
+			switch t.Name.Local {
+
+			case "channel":
+				var channel Channel
+				if err = decoder.DecodeElement(&channel, &t); err != nil {
+					return 0, 0, err
+				}
+				channels++
+
+			case "programme":
+				var program Program
+				if err = decoder.DecodeElement(&program, &t); err != nil {
+					return 0, 0, err
+				}
+				programs++
+
+			default:
+				if err = decoder.Skip(); err != nil {
+					return 0, 0, err
+				}
+
+			}
+
+		case xml.EndElement:
+			// end of the root element; anything after it is ignored, as by
+			// xml.Unmarshal
+			return channels, programs, nil
+
+		}
+	}
 }
 
 var buildXEPGCount int
