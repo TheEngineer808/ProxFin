@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 
+	"sync"
 	"time"
 	//"fmt"
 	//"log"
@@ -28,6 +29,16 @@ var databaseFile = "authentication.json"
 
 var data = make(map[string]interface{})
 var tokens = make(map[string]interface{})
+
+// mu guards data and tokens. They are used by every authenticated HTTP
+// request (lineup, m3u, xmltv, web, api) in parallel; unsynchronised map
+// writes there crashed the whole process ("concurrent map writes").
+// Exported functions that touch the maps take it; they never call each
+// other while holding it.
+var mu sync.Mutex
+
+// lastTokenCleanup is when expired tokens were last removed from tokens.
+var lastTokenCleanup time.Time
 
 var initAuthentication = false
 
@@ -127,6 +138,8 @@ func main() {
 
 // Init : databasePath = Path to authentication.json
 func Init(databasePath string, validity int) (err error) {
+	mu.Lock()
+	defer mu.Unlock()
 	database = filepath.Dir(databasePath) + string(os.PathSeparator) + databaseFile
 
 	// Check if the database already exists
@@ -153,6 +166,8 @@ func Init(databasePath string, validity int) (err error) {
 
 // CreateDefaultUser = created efault user
 func CreateDefaultUser(username, password string) (err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -175,6 +190,8 @@ func CreateDefaultUser(username, password string) (err error) {
 
 // CreateNewUser : create new user
 func CreateNewUser(username, password string) (userID string, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -211,6 +228,8 @@ func CreateNewUser(username, password string) (userID string, err error) {
 
 // UserAuthentication : user authentication
 func UserAuthentication(username, password string) (token string, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -247,6 +266,8 @@ func UserAuthentication(username, password string) (token string, err error) {
 
 // CheckTheValidityOfTheToken : check token
 func CheckTheValidityOfTheToken(token string) (newToken string, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -276,6 +297,8 @@ func CheckTheValidityOfTheToken(token string) (newToken string, err error) {
 
 // GetUserID : get user ID
 func GetUserID(token string) (userID string, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -300,6 +323,8 @@ func GetUserID(token string) (userID string, err error) {
 
 // WriteUserData : save user date
 func WriteUserData(userID string, userData map[string]interface{}) (err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -310,7 +335,7 @@ func WriteUserData(userID string, userData map[string]interface{}) (err error) {
 
 	if v, ok := data["users"].(map[string]interface{})[userID].(map[string]interface{}); ok {
 
-		v["data"] = userData
+		v["data"] = copyMap(userData)
 		err = saveDatabase(data)
 
 	} else {
@@ -322,6 +347,8 @@ func WriteUserData(userID string, userData map[string]interface{}) (err error) {
 
 // ReadUserData : load user date
 func ReadUserData(userID string) (userData map[string]interface{}, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -331,7 +358,9 @@ func ReadUserData(userID string) (userData map[string]interface{}, err error) {
 	err = createError(031)
 
 	if v, ok := data["users"].(map[string]interface{})[userID].(map[string]interface{}); ok {
-		userData = v["data"].(map[string]interface{})
+		// A copy: the caller uses it after the lock is released.
+		userData, _ = v["data"].(map[string]interface{})
+		userData = copyMap(userData)
 		err = nil
 
 		return
@@ -342,6 +371,8 @@ func ReadUserData(userID string) (userData map[string]interface{}, err error) {
 
 // RemoveUser : remove user
 func RemoveUser(userID string) (err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -384,6 +415,8 @@ func SetDefaultUserData(defaults map[string]interface{}) (err error) {
 
 // ChangeCredentials : change credentials
 func ChangeCredentials(userID, username, password string) (err error) {
+	mu.Lock()
+	defer mu.Unlock()
 	err = checkInit()
 	if err != nil {
 		return
@@ -411,6 +444,8 @@ func ChangeCredentials(userID, username, password string) (err error) {
 
 // GetAllUserData : get all user data
 func GetAllUserData() (allUserData map[string]interface{}, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 
 	err = checkInit()
 	if err != nil {
@@ -426,8 +461,32 @@ func GetAllUserData() (allUserData map[string]interface{}, err error) {
 		data = defaults
 	}
 
-	allUserData = data["users"].(map[string]interface{})
+	// A copy: callers iterate it and encode it to JSON after the lock is
+	// released, while other requests may change the users.
+	allUserData = make(map[string]interface{})
+	for id, u := range data["users"].(map[string]interface{}) {
+		if user, ok := u.(map[string]interface{}); ok {
+			user = copyMap(user)
+			if d, ok := user["data"].(map[string]interface{}); ok {
+				user["data"] = copyMap(d)
+			}
+			allUserData[id] = user
+		}
+	}
+
 	return
+}
+
+// copyMap returns a shallow copy of m.
+func copyMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CheckTheValidityOfTheTokenFromHTTPHeader : get token from HTTP header
@@ -464,9 +523,16 @@ func saveDatabase(tmpMap interface{}) (err error) {
 		return
 	}
 
-	err = os.WriteFile(database, []byte(jsonString), 0600)
-	if err != nil {
+	// Write to a temporary file and rename it, so a crash mid-write can't
+	// leave an empty user database behind.
+	var tmp = database + ".tmp"
+	if err = os.WriteFile(tmp, jsonString, 0600); err != nil {
 		return
+	}
+
+	if err = os.Rename(tmp, database); err != nil {
+		os.Remove(tmp)
+		err = os.WriteFile(database, jsonString, 0600)
 	}
 
 	return
@@ -558,6 +624,17 @@ func defaultsForNewUser(username, password string) map[string]interface{} {
 
 func setToken(id, oldToken string) (newToken string) {
 	delete(tokens, oldToken)
+
+	// Every login adds a token and only refreshing one removes it, so remove
+	// the expired ones now and then or the map grows with every login.
+	if now := time.Now(); now.Sub(lastTokenCleanup) > time.Minute {
+		for t, v := range tokens {
+			if expires, ok := v.(map[string]interface{})["expires"].(time.Time); !ok || expires.Before(now) {
+				delete(tokens, t)
+			}
+		}
+		lastTokenCleanup = now
+	}
 
 loopToken:
 	newToken = randomString(tokenLength)
