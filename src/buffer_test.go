@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"threadfin/src/internal/streambuf"
 )
 
 // These tests drive the whole buffer (HTTP handler, stream manager, real
@@ -567,5 +570,58 @@ func BenchmarkBufferViewerConnect(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		get(context.Background(), 64<<10)
+	}
+}
+
+// Shutdown kills every source process (the processes run in their own
+// process groups, so they would otherwise outlive Threadfin), and no new
+// stream starts after it.
+func TestBufferShutdownKillsEveryProcess(t *testing.T) {
+	setupBufferTest(t)
+
+	m := streambuf.NewManager(streambuf.Logger{})
+	marker := "shutdown-" + t.Name()
+	request := func(i int) streambuf.Request {
+		return streambuf.Request{
+			Channel: fmt.Sprint("chan", i),
+			Program: "FFMPEG",
+			Sources: []streambuf.Source{streamSource(testPlaylistID, fmt.Sprintf("stream?%s-%d", marker, i), "primary")},
+			Launch:  bufferLauncher("ffmpeg"),
+			Config:  bufferConfig(),
+		}
+	}
+
+	var viewers []*streambuf.Viewer
+	for i := 0; i < 3; i++ {
+		v, err := m.Join(context.Background(), request(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer v.Close()
+		viewers = append(viewers, v)
+	}
+	for _, v := range viewers {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := v.WaitReady(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("stream did not start: %v", err)
+		}
+	}
+	if n := countProcesses(marker); n != 3 {
+		t.Fatalf("%d source processes running, want 3", n)
+	}
+
+	if err := m.Shutdown(5 * time.Second); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if n := countProcesses(marker); n != 0 {
+		t.Errorf("%d source processes still running after Shutdown", n)
+	}
+	if st := m.Stats(); st.Streams != 0 {
+		t.Errorf("streams after Shutdown: %+v", st)
+	}
+	if _, err := m.Join(context.Background(), request(9)); !errors.Is(err, streambuf.ErrShutdown) {
+		t.Errorf("Join after Shutdown = %v, want ErrShutdown", err)
 	}
 }

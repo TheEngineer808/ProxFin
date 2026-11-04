@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -785,4 +786,105 @@ func TestPooledChunksAreNeverReusedEarly(t *testing.T) {
 		}(int64(i))
 	}
 	wg.Wait()
+}
+
+func TestShutdownStopsEverything(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}, "c": {}, "busy": {}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Linger = time.Hour
+
+	var viewers []*Viewer
+	for _, url := range []string{"a", "b", "c"} {
+		s := src("P", url)
+		s.TunerLimit = 3
+		v, err := m.Join(context.Background(), request(l, cfg, s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := v.WaitReady(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		viewers = append(viewers, v)
+	}
+	viewers[2].Close() // channel c lingers
+
+	// A channel on another playlist waits for a tuner.
+	busy, other := src("Q", "busy"), src("Q", "c")
+	busy.TunerLimit, other.TunerLimit = 1, 1
+	bv, _ := m.Join(context.Background(), request(l, cfg, busy))
+	defer bv.Close()
+	waiting := make(chan error, 1)
+	go func() {
+		cfg := cfg
+		cfg.TunerWait = time.Minute
+		_, err := m.Join(context.Background(), request(l, cfg, other))
+		waiting <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	if err := m.Shutdown(2 * time.Second); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	t.Logf("shutdown took %v", time.Since(start))
+
+	// Shutdown returns once every process was waited for; the fake
+	// launcher's own count follows a moment later.
+	for deadline := time.Now().Add(time.Second); l.running.Load() > 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := l.running.Load(); n != 0 {
+		t.Errorf("%d processes still running after Shutdown", n)
+	}
+	if st := m.Stats(); st != (Stats{}) {
+		t.Errorf("stats after Shutdown: %+v", st)
+	}
+	select {
+	case err := <-waiting:
+		if !errors.Is(err, ErrShutdown) {
+			t.Errorf("waiting Join = %v, want ErrShutdown", err)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("a Join waiting for a tuner was not released by Shutdown")
+	}
+	for _, v := range viewers[:2] {
+		if _, err := readFor(t, v, time.Second); !errors.Is(err, ErrStopped) {
+			t.Errorf("viewer got %v, want ErrStopped", err)
+		}
+		v.Close()
+	}
+	if _, err := m.Join(context.Background(), request(l, cfg, src("P", "a"))); !errors.Is(err, ErrShutdown) {
+		t.Errorf("Join after Shutdown = %v, want ErrShutdown", err)
+	}
+	if err := m.Shutdown(time.Second); err != nil { // a second call is harmless
+		t.Errorf("second Shutdown: %v", err)
+	}
+}
+
+// stuckProc ignores Stop: its output ends only when the test releases it.
+type stuckProc struct{ release chan struct{} }
+
+func (p stuckProc) Read([]byte) (int, error) { <-p.release; return 0, io.EOF }
+func (p stuckProc) Stop()                    {}
+func (p stuckProc) Wait() error              { return nil }
+
+func TestShutdownTimesOutOnAProcessThatDoesNotExit(t *testing.T) {
+	p := stuckProc{release: make(chan struct{})}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")},
+		Launch: func(Source) (Process, error) { return p, nil }, Config: testConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	time.Sleep(20 * time.Millisecond) // the process is started
+
+	if err := m.Shutdown(100 * time.Millisecond); !errors.Is(err, ErrShutdownTimeout) {
+		t.Errorf("Shutdown = %v, want ErrShutdownTimeout", err)
+	}
+	close(p.release)
+	if err := m.Shutdown(time.Second); err != nil {
+		t.Errorf("Shutdown once the process ended: %v", err)
+	}
 }

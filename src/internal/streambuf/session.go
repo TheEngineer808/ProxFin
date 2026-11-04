@@ -31,6 +31,11 @@ var (
 	// ErrStopped means the stream was stopped (no viewers left, or its
 	// tuner was needed for another channel).
 	ErrStopped = errors.New("stream stopped")
+	// ErrShutdown is returned by Join after Shutdown.
+	ErrShutdown = errors.New("stream buffer shut down")
+	// ErrShutdownTimeout is returned by Shutdown when streams were still
+	// ending after its timeout.
+	ErrShutdownTimeout = errors.New("streams still running after the shutdown timeout")
 
 	errStartTimeout = errors.New("no data from the source")
 	errStalled      = errors.New("the source stopped sending data")
@@ -188,6 +193,9 @@ type Manager struct {
 	// released, or a stream lost its last viewer (a lingering stream gives
 	// its tuner to a new channel). Joins waiting for a tuner look again.
 	tunerChange chan struct{}
+
+	shutdown bool
+	running  sync.WaitGroup // session goroutines, each until its process has exited
 }
 
 // NewManager creates an empty manager.
@@ -240,6 +248,11 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 
 	m.mu.Lock()
 	for {
+		if m.shutdown {
+			m.mu.Unlock()
+			return nil, ErrShutdown
+		}
+
 		if s := m.sessions[key]; s != nil {
 			v := s.addViewerLocked()
 			n := s.viewers
@@ -260,6 +273,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 			s.tunerPlaylist = primary.PlaylistID
 			used := m.tuners[primary.PlaylistID]
 			v := s.addViewerLocked()
+			m.running.Add(1)
 			m.mu.Unlock()
 
 			m.logEvicted(evicted)
@@ -285,6 +299,37 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 		}
 		timer.Stop()
 		m.mu.Lock()
+	}
+}
+
+// Shutdown stops every stream, killing each source's process (and the
+// processes it started), and waits up to timeout for them to exit; it
+// returns ErrShutdownTimeout if some were still running then. Viewers get
+// ErrStopped, and Joins after Shutdown (including those waiting for a
+// tuner) fail with ErrShutdown. Call it before Threadfin exits: the
+// processes run in their own process groups, so they would otherwise
+// outlive it and keep holding the providers' connections.
+func (m *Manager) Shutdown(timeout time.Duration) error {
+	m.mu.Lock()
+	m.shutdown = true
+	for _, s := range m.sessions {
+		m.stopLocked(s)
+	}
+	m.tunerChangedLocked() // wakes the Joins waiting for a tuner
+	m.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.running.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-t.C:
+		return ErrShutdownTimeout
 	}
 }
 
@@ -453,6 +498,8 @@ func (s *session) addViewerLocked() *Viewer {
 
 // run supervises the stream until it is stopped or every source failed.
 func (s *session) run() {
+	defer s.m.running.Done() // last: after the process has exited
+
 	var finalErr = ErrStopped
 	defer func() {
 		s.m.mu.Lock()
