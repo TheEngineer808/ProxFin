@@ -817,6 +817,8 @@ func buildDatabaseDVR() (err error) {
 		return
 	}
 
+	var filters = prepareFilters(Data.Filter)
+
 	for _, fileType := range availableFileTypes {
 
 		var playlistFile = getLocalProviderFiles(fileType)
@@ -903,7 +905,7 @@ func buildDatabaseDVR() (err error) {
 					status = true
 				} else {
 					var liveEvent bool
-					status, liveEvent = filterThisStream(stream)
+					status, liveEvent = matchStream(s, filters)
 					s["liveEvent"] = strconv.FormatBool(liveEvent)
 				}
 

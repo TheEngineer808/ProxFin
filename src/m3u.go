@@ -38,41 +38,39 @@ func parsePlaylist(filename, fileType string) (channels []interface{}, err error
 	return
 }
 
-// Streams filtern
-func filterThisStream(s interface{}) (status bool, liveEvent bool) {
+// Patterns for the conditions of a filter rule: "!{...}" (exclude) and
+// "{...}" (include).
+var (
+	filterExcludePattern = regexp.MustCompile(`!+[{]+[^.]+[}]`)
+	filterIncludePattern = regexp.MustCompile(`[{]+[^.]+[}]`)
+)
 
-	status = false
-	var stream = s.(map[string]string)
-	var regexpYES = `[{]+[^.]+[}]`
-	var regexpNO = `!+[{]+[^.]+[}]`
+// preparedFilter is a filter rule split into its parts once per build.
+// The rule used to be parsed, and both patterns compiled, for every stream
+// and every filter.
+type preparedFilter struct {
+	caseSensitive bool
+	liveEvent     bool
+	filterType    string
+	rule          string
+	exclude       string
+	include       string
+}
 
-	liveEvent = false
+func prepareFilters(filters []Filter) (prepared []preparedFilter) {
 
-	for _, filter := range Data.Filter {
+	prepared = make([]preparedFilter, 0, len(filters))
+
+	for _, filter := range filters {
 
 		if filter.Rule == "" {
 			continue
 		}
 
-		liveEvent = filter.LiveEvent
-
-		var group, name, search string
 		var exclude, include string
-		var match = false
-
-		var streamValues = strings.Replace(stream["_values"], "\r", "", -1)
-
-		if v, ok := stream["group-title"]; ok {
-			group = v
-		}
-
-		if v, ok := stream["name"]; ok {
-			name = v
-		}
 
 		// Unerwünschte Streams !{DEU}
-		r := regexp.MustCompile(regexpNO)
-		val := r.FindStringSubmatch(filter.Rule)
+		val := filterExcludePattern.FindStringSubmatch(filter.Rule)
 
 		if len(val) == 1 {
 
@@ -83,8 +81,7 @@ func filterThisStream(s interface{}) (status bool, liveEvent bool) {
 		}
 
 		// Muss zusätzlich erfüllt sein {DEU}
-		r = regexp.MustCompile(regexpYES)
-		val = r.FindStringSubmatch(filter.Rule)
+		val = filterIncludePattern.FindStringSubmatch(filter.Rule)
 
 		if len(val) == 1 {
 
@@ -94,47 +91,93 @@ func filterThisStream(s interface{}) (status bool, liveEvent bool) {
 
 		}
 
-		switch filter.CaseSensitive {
-
-		case false:
-
-			streamValues = strings.ToLower(streamValues)
+		if !filter.CaseSensitive {
 			filter.Rule = strings.ToLower(filter.Rule)
 			exclude = strings.ToLower(exclude)
 			include = strings.ToLower(include)
-			group = strings.ToLower(group)
-			name = strings.ToLower(name)
-
 		}
 
-		switch filter.Type {
+		prepared = append(prepared, preparedFilter{
+			caseSensitive: filter.CaseSensitive,
+			liveEvent:     filter.LiveEvent,
+			filterType:    filter.Type,
+			rule:          filter.Rule,
+			exclude:       exclude,
+			include:       include,
+		})
+
+	}
+
+	return
+}
+
+// Streams filtern
+func filterThisStream(s interface{}) (status bool, liveEvent bool) {
+	return matchStream(s.(map[string]string), prepareFilters(Data.Filter))
+}
+
+// matchStream reports whether the stream passes the filters, and the live
+// event setting of the filter that decided (of the last filter if none
+// matched).
+func matchStream(stream map[string]string, filters []preparedFilter) (status bool, liveEvent bool) {
+
+	if len(filters) == 0 {
+		return false, false
+	}
+
+	var group = stream["group-title"]
+	var name = stream["name"]
+	var streamValues = strings.Replace(stream["_values"], "\r", "", -1)
+
+	// lower-case variants, computed once when a filter needs them
+	var lowered bool
+	var lowerGroup, lowerName, lowerValues string
+
+	for _, filter := range filters {
+
+		liveEvent = filter.liveEvent
+
+		var g, n, v = group, name, streamValues
+
+		if !filter.caseSensitive {
+			if !lowered {
+				lowerGroup = strings.ToLower(group)
+				lowerName = strings.ToLower(name)
+				lowerValues = strings.ToLower(streamValues)
+				lowered = true
+			}
+			g, n, v = lowerGroup, lowerName, lowerValues
+		}
+
+		var search string
+		var match = false
+
+		switch filter.filterType {
 
 		case "group-title":
-			search = name
+			search = n
 
-			if group == filter.Rule {
+			if g == filter.rule {
 				match = true
 			}
 
 		case "custom-filter":
-			search = streamValues
-			if strings.Contains(search, filter.Rule) {
+			search = v
+			if strings.Contains(search, filter.rule) {
 				match = true
 			}
 		}
 
-		if match == true {
+		if match {
 
-			if len(exclude) > 0 {
-				var status = checkConditions(search, exclude, "exclude")
-				if status == false {
+			if len(filter.exclude) > 0 {
+				if !checkConditions(search, filter.exclude, "exclude") {
 					return false, liveEvent
 				}
 			}
 
-			if len(include) > 0 {
-				var status = checkConditions(search, include, "include")
-				if status == false {
+			if len(filter.include) > 0 {
+				if !checkConditions(search, filter.include, "include") {
 					return false, liveEvent
 				}
 			}
