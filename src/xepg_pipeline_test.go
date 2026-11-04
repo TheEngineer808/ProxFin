@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"threadfin/src/internal/imgcache"
 )
@@ -325,3 +326,26 @@ func benchmarkProgramData(b *testing.B, get func(XEPGChannelStruct) (XMLTV, erro
 
 func BenchmarkGetProgramData(b *testing.B)       { benchmarkProgramData(b, getProgramData) }
 func BenchmarkGetProgramDataLegacy(b *testing.B) { benchmarkProgramData(b, legacyGetProgramData) }
+
+// A dummy length of 0 looped forever, adding programmes until memory ran
+// out. Other lengths are unchanged.
+func TestDummyProgramLengths(t *testing.T) {
+	usePipelineFolders(t)
+
+	for mapping, want := range map[string]int{
+		"30_Minutes": 4 * 48, "60_Minutes": 4 * 24, "360_Minutes": 4 * 4,
+		"0_Minutes": 4 * 48, "00_Minutes": 4 * 48, "99999999999999999999_Minutes": 0,
+		"abc_Minutes": 4 * 48, "2000_Minutes": 0,
+	} {
+		done := make(chan int, 1)
+		go func() { done <- len(createDummyProgram(XEPGChannelStruct{XMapping: mapping, XName: "Dummy"}).Program) }()
+		select {
+		case got := <-done:
+			if got != want {
+				t.Errorf("%s: %d programmes, want %d", mapping, got, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: no result after 10 s", mapping)
+		}
+	}
+}

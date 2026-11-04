@@ -1354,6 +1354,12 @@ func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 	return
 }
 
+// Patterns compiled once instead of once per channel
+var (
+	liveEventTimePattern = regexp.MustCompile(`((\d{1,2}[./]\d{1,2})[-\s])*(\d{1,2}(:\d{2})*\s*(AM|PM)?(?:\s*(ET|CT|MT|PT|EST|CST|MST|PST))?)`)
+	dummyLengthPattern   = regexp.MustCompile(`^\d+$`)
+)
+
 func createLiveProgram(xepgChannel XEPGChannelStruct, channelId string) []*Program {
 	var programs []*Program
 
@@ -1373,8 +1379,7 @@ func createLiveProgram(xepgChannel XEPGChannelStruct, channelId string) []*Progr
 	// Search for Datetime or Time
 	// Datetime examples: '12/31-11:59 PM', '1.1 6:30 AM', '09/15-10:00PM', '7/4 12:00 PM', '3.21 3:45 AM', '6/30-8:00 AM', '4/15 3AM'
 	// Time examples: '11:59 PM', '6:30 AM', '11:59PM', '1PM'
-	re := regexp.MustCompile(`((\d{1,2}[./]\d{1,2})[-\s])*(\d{1,2}(:\d{2})*\s*(AM|PM)?(?:\s*(ET|CT|MT|PT|EST|CST|MST|PST))?)`)
-	matches := re.FindStringSubmatch(name)
+	matches := liveEventTimePattern.FindStringSubmatch(name)
 	layout := "2006.1.2 3:04 PM"
 	if len(matches) > 0 {
 		timePart := matches[len(matches)-2]
@@ -1550,11 +1555,15 @@ func createDummyProgram(xepgChannel XEPGChannelStruct) (dummyXMLTV XMLTV) {
 	var dl = strings.Split(xepgChannel.XMapping, "_")
 	if dl[0] != "" {
 		// Check if the first part is a valid integer
-		if match, _ := regexp.MatchString(`^\d+$`, dl[0]); match {
+		if dummyLengthPattern.MatchString(dl[0]) {
 			dummyLength, err = strconv.Atoi(dl[0])
 			if err != nil {
 				ShowError(err, 000)
 				// Continue with default value instead of returning
+			}
+			// A length of 0 made the loop below add programmes forever
+			if dummyLength <= 0 {
+				dummyLength = 30
 			}
 		} else {
 			// For non-numeric formats that aren't "PPV" (which is handled above),
