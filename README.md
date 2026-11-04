@@ -422,7 +422,7 @@ The `vendor/` folder is out of date, which is why `-mod=mod` is needed.
 
 ### Releases and updates
 
-- **Release builds.** Pushing a tag matching `1.*` runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It builds the binaries (`ProxFin_<os>_<arch>`, the names the updater downloads), pushes Docker images to `<DOCKERHUB_USERNAME>/proxfin`, and creates a GitHub release.
+- **Release builds.** Pushing a version tag such as `2.0.0` runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It builds the binaries (`ProxFin_<os>_<arch>`, the names the updater downloads), pushes Docker images to `<DOCKERHUB_USERNAME>/proxfin`, and creates a GitHub release.
 - **Updates.** Automatic updates download those releases from the repository named by the `GitHub` variable in [`proxfin.go`](proxfin.go), which is `TheEngineer808/ProxFin`. They stay off (`Update: false`) until releases exist.
 - **Forks** should point the variable at their own repository.
 - **Guard test.** `proxfin_test.go` fails if updates are switched on while the variable points at upstream Threadfin, whose releases would replace ProxFin.
