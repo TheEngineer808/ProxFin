@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/url"
-	"os"
 	"os/exec"
 	"path"
 	"regexp"
@@ -259,12 +258,14 @@ func buildM3U(groups []string) (m3u string, err error) {
 // copyTo if it isn't nil.
 func saveM3UFile(copyTo io.Writer) (err error) {
 
+	// Written next to the playlist and renamed into place, so /m3u/ never
+	// serves a partly written playlist while it is rebuilt.
 	filename := System.Folder.Data + "threadfin.m3u"
-	file, err := os.Create(filename)
+	file, err := createAtomic(filename)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer file.Discard()
 
 	writer := bufio.NewWriterSize(file, 1<<20) // 1MB buffer
 
@@ -281,7 +282,7 @@ func saveM3UFile(copyTo io.Writer) (err error) {
 		return err
 	}
 
-	return file.Close()
+	return file.Commit()
 }
 
 // writeM3U writes the playlist of the given groups (all if empty) to w.

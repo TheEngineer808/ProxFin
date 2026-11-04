@@ -212,15 +212,21 @@ func compressGZIPFile(sourcePath, targetPath string) (err error) {
 	}
 	defer in.Close()
 
-	out, err := os.Create(targetPath)
+	// Renamed into place when complete, like the XML file itself.
+	out, err := createAtomic(targetPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer out.Discard()
 
 	gw := gzip.NewWriter(out)
-	defer gw.Close()
+	if _, err = io.Copy(gw, in); err != nil {
+		return err
+	}
+	// Close writes the gzip footer; an error here means a broken file.
+	if err = gw.Close(); err != nil {
+		return err
+	}
 
-	_, err = io.Copy(gw, in)
-	return err
+	return out.Commit()
 }

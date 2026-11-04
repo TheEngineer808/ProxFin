@@ -829,6 +829,9 @@ func buildDatabaseDVR() (err error) {
 
 	err = createFilterRules()
 	if err != nil {
+		// Clear the flag, or the scheduled updates and XEPG builds, which
+		// skip while a scan is in progress, would stay off until a restart.
+		System.ScanInProgress = 0
 		return
 	}
 

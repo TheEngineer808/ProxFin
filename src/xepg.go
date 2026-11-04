@@ -432,7 +432,8 @@ func createXEPGDatabase() (err error) {
 	settings_json, _ := json.Marshal(settings)
 	var reloaded SettingsStruct
 	json.Unmarshal(settings_json, &reloaded)
-	Settings = reloaded
+	// Streams read the provider maps in Settings under providerMutex.
+	withProviders(func() { Settings = reloaded })
 
 	// Remove duplicate channels from existing XEPG database based on new hash logic
 	removeDuplicateChannels()
@@ -1068,11 +1069,13 @@ func createXMLTVFile() (err error) {
 	showInfo("XEPG:" + fmt.Sprintf("Create XMLTV file (%s)", System.File.XML))
 
 	// Stream XML to disk to avoid huge memory usage
-	xmlFile, err := os.Create(System.File.XML)
+	// Written next to the guide and renamed into place, so /xmltv/ never
+	// serves a partly written guide while it is rebuilt.
+	xmlFile, err := createAtomic(System.File.XML)
 	if err != nil {
 		return err
 	}
-	defer xmlFile.Close()
+	defer xmlFile.Discard()
 	writer := bufio.NewWriterSize(xmlFile, 1<<20) // 1MB buffer
 
 	var xepgXML XMLTV
@@ -1190,7 +1193,7 @@ func createXMLTVFile() (err error) {
 	if err = writer.Flush(); err != nil {
 		return err
 	}
-	if err = xmlFile.Close(); err != nil {
+	if err = xmlFile.Commit(); err != nil {
 		return err
 	}
 

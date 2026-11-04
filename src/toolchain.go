@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -326,6 +327,69 @@ func writeFileAtomic(filename string, data []byte, perm os.FileMode) (err error)
 	}
 
 	return nil
+}
+
+// atomicFile is written next to its target and renamed over it by Commit,
+// so a reader (a client fetching the playlist or guide while it is rebuilt)
+// sees either the old or the new file, never a partial one.
+type atomicFile struct {
+	*os.File
+	target    string
+	committed bool
+}
+
+// createAtomic starts replacing filename. Defer Discard: it removes the
+// temporary file unless Commit succeeded.
+func createAtomic(filename string) (*atomicFile, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(filename), "."+filepath.Base(filename)+".tmp*")
+	if err != nil {
+		return nil, err
+	}
+	return &atomicFile{File: tmp, target: filename}, nil
+}
+
+// Commit closes the file and puts it in place of the target.
+func (f *atomicFile) Commit() (err error) {
+	if err = f.File.Chmod(0644); err != nil {
+		return err
+	}
+	if err = f.File.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), f.target); err != nil {
+		// The target can't be replaced (e.g. bind-mounted): copy instead.
+		if err = copyFileContents(f.Name(), f.target); err != nil {
+			return err
+		}
+		os.Remove(f.Name())
+	}
+	f.committed = true
+	return nil
+}
+
+// Discard removes the temporary file if it wasn't committed.
+func (f *atomicFile) Discard() {
+	if !f.committed {
+		f.File.Close()
+		os.Remove(f.Name())
+	}
+}
+
+func copyFileContents(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func loadJSONFileToMap(file string) (tmpMap map[string]interface{}, err error) {
