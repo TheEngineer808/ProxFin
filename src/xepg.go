@@ -469,6 +469,10 @@ func createXEPGDatabase() (err error) {
 		xepgChannelsValuesMap[channelHash] = channel
 	}
 
+	// Database channels by playlist and UUID, for streams whose hash is not
+	// in the database (e.g. a changed URL)
+	var byUUID = newUUIDMatcher(xepgChannelsValuesMap, Data.Streams.Inactive)
+
 	for _, dsa := range Data.Streams.Active {
 		var channelExists = false  // Entscheidet ob ein Kanal neu zu Datenbank hinzugefügt werden soll.  Decides whether a channel should be added to the database
 		var channelHasUUID = false // Überprüft, ob der Kanal (Stream) eindeutige ID's besitzt.  Checks whether the channel (stream) has unique IDs
@@ -507,28 +511,11 @@ func createXEPGDatabase() (err error) {
 			if len(m3uChannel.UUIDValue) > 0 {
 				channelHasUUID = true
 			}
-		} else {
-			// XEPG Datenbank durchlaufen um nach dem Kanal zu suchen.  Run through the XEPG database to search for the channel (full scan)
-			for _, dxc := range xepgChannelsValuesMap {
-				if m3uChannel.FileM3UID == dxc.FileM3UID && !isInInactiveList(dxc.URL) {
-
-					dxc.FileM3UID = m3uChannel.FileM3UID
-					dxc.FileM3UName = m3uChannel.FileM3UName
-
-					// Vergleichen des Streams anhand einer UUID in der M3U mit dem Kanal in der Databank.  Compare the stream using a UUID in the M3U with the channel in the database
-					if len(dxc.UUIDValue) > 0 && len(m3uChannel.UUIDValue) > 0 {
-						if dxc.UUIDValue == m3uChannel.UUIDValue {
-
-							channelExists = true
-							channelHasUUID = true
-							currentXEPGID = dxc.XEPG
-							break
-
-						}
-					}
-				}
-
-			}
+		} else if dxc, ok := byUUID.find(m3uChannel.FileM3UID, m3uChannel.UUIDValue); ok {
+			// Vergleichen des Streams anhand einer UUID in der M3U mit dem Kanal in der Databank.  Compare the stream using a UUID in the M3U with the channel in the database
+			channelExists = true
+			channelHasUUID = true
+			currentXEPGID = dxc.XEPG
 		}
 
 		switch channelExists {
@@ -716,6 +703,7 @@ func createXEPGDatabase() (err error) {
 			newChannel.ChannelUniqueID = m3uChannelHash
 			Data.XEPG.Channels[xepg] = newChannel
 			xepgChannelsValuesMap[m3uChannelHash] = newChannel
+			byUUID.add(newChannel)
 
 		}
 	}
@@ -1794,29 +1782,78 @@ func parseXMLTVStream(file string, xmltv *XMLTV) error {
 	return nil
 }
 
-func isInInactiveList(channelURL string) bool {
-	for _, channel := range Data.Streams.Inactive {
-		// Type assert channel to map[string]interface{}
-		chMap, ok := channel.(map[string]interface{})
-		if !ok {
-			continue
-		}
+// uuidMatcher finds the database channel of a stream by its playlist and
+// UUID (tvg-name), skipping channels whose URL is now a filtered-out
+// (inactive) stream. createXEPGDatabase used to scan the whole database for
+// every stream not found by its hash and, for every channel of the same
+// playlist, the whole inactive list: new channels x database x inactive
+// streams. That check also never matched: it expected the inactive streams
+// as map[string]interface{}, but they are map[string]string.
+type uuidMatcher struct {
+	inactiveURLs map[string]struct{}
+	channels     map[string][]XEPGChannelStruct // by playlist ID + UUID
+}
 
-		urlValue, exists := chMap["url"]
-		if !exists {
-			continue
-		}
+func newUUIDMatcher(channels map[string]XEPGChannelStruct, inactive []interface{}) *uuidMatcher {
 
-		urlStr, ok := urlValue.(string)
-		if !ok {
-			continue
-		}
+	var m = &uuidMatcher{
+		inactiveURLs: make(map[string]struct{}, len(inactive)),
+		channels:     make(map[string][]XEPGChannelStruct),
+	}
 
-		if urlStr == channelURL {
-			return true
+	for _, stream := range inactive {
+		switch s := stream.(type) {
+		case map[string]string:
+			m.inactiveURLs[s["url"]] = struct{}{}
+		case map[string]interface{}:
+			if url, ok := s["url"].(string); ok {
+				m.inactiveURLs[url] = struct{}{}
+			}
 		}
 	}
-	return false
+
+	// Several channels can have the same UUID; which one matched used to
+	// depend on map order. It is now the first in XEPG ID order.
+	var ids = make([]string, 0, len(channels))
+	var byID = make(map[string]XEPGChannelStruct, len(channels))
+	for _, channel := range channels {
+		if len(channel.UUIDValue) > 0 {
+			ids = append(ids, channel.XEPG)
+			byID[channel.XEPG] = channel
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		m.add(byID[id])
+	}
+
+	return m
+}
+
+func uuidMatcherKey(fileID, uuid string) string {
+	return fileID + "\x00" + uuid
+}
+
+func (m *uuidMatcher) add(channel XEPGChannelStruct) {
+	if len(channel.UUIDValue) > 0 {
+		var key = uuidMatcherKey(channel.FileM3UID, channel.UUIDValue)
+		m.channels[key] = append(m.channels[key], channel)
+	}
+}
+
+func (m *uuidMatcher) find(fileID, uuid string) (XEPGChannelStruct, bool) {
+
+	if len(uuid) == 0 {
+		return XEPGChannelStruct{}, false
+	}
+
+	for _, channel := range m.channels[uuidMatcherKey(fileID, uuid)] {
+		if _, inactive := m.inactiveURLs[channel.URL]; !inactive {
+			return channel, true
+		}
+	}
+
+	return XEPGChannelStruct{}, false
 }
 
 // M3U Datei erstellen

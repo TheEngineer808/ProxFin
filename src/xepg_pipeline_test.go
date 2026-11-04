@@ -16,7 +16,7 @@ import (
 
 // usePipelineFolders points the files and caches the playlist/EPG pipeline
 // uses at a temporary folder and restores them when the test ends.
-func usePipelineFolders(t *testing.T) string {
+func usePipelineFolders(t testing.TB) string {
 	t.Helper()
 
 	savedSystemFolder, savedSystemFile, savedGZ, savedInfo := System.Folder, System.File, System.Compressed.GZxml, System.Flag.Info
@@ -104,7 +104,7 @@ func TestXMLTVGzipIsComplete(t *testing.T) {
 
 // useSettings restores the settings when the test ends and sends saved
 // settings to a temporary file.
-func useSettings(t *testing.T, dir string) {
+func useSettings(t testing.TB, dir string) {
 	t.Helper()
 	savedSettings, savedSettingsFile, savedTemp := Settings, System.File.Settings, System.Folder.Temp
 	t.Cleanup(func() {
