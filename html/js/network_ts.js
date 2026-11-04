@@ -39,6 +39,9 @@ class Server {
             }
         };
         ws.onmessage = function (e) {
+            // The server answers each request with a single message; close the
+            // socket so neither side keeps it open.
+            this.close();
             SERVER_CONNECTION = false;
             showElement("loading", false);
             console.log("RESPONSE:");
@@ -73,26 +76,7 @@ class Server {
                     if (document.getElementById("content_log")) {
                         showLogs(false);
                     }
-                    if (document.getElementById("playlist-connection-information")) {
-                        let activeClass = "text-primary";
-                        if (response["clientInfo"]["activePlaylist"] / response["clientInfo"]["totalPlaylist"] >= 0.6 && response["clientInfo"]["activePlaylist"] / response["clientInfo"]["totalPlaylist"] < 0.8) {
-                            activeClass = "text-warning";
-                        }
-                        else if (response["clientInfo"]["activePlaylist"] / response["clientInfo"]["totalPlaylist"] >= 0.8) {
-                            activeClass = "text-danger";
-                        }
-                        document.getElementById("playlist-connection-information").innerHTML = "Playlist Connections: <span class='" + activeClass + "'>" + response["clientInfo"]["activePlaylist"] + " / " + response["clientInfo"]["totalPlaylist"] + "</span>";
-                    }
-                    if (document.getElementById("client-connection-information")) {
-                        let activeClass = "text-primary";
-                        if (response["clientInfo"]["activeClients"] / response["clientInfo"]["totalClients"] >= 0.6 && response["clientInfo"]["activeClients"] / response["clientInfo"]["totalClients"] < 0.8) {
-                            activeClass = "text-warning";
-                        }
-                        else if (response["clientInfo"]["activeClients"] / response["clientInfo"]["totalClients"] >= 0.8) {
-                            activeClass = "text-danger";
-                        }
-                        document.getElementById("client-connection-information").innerHTML = "Client Connections: <span class='" + activeClass + "'>" + response["clientInfo"]["activeClients"] + " / " + response["clientInfo"]["totalClients"] + "</span>";
-                    }
+                    renderConnectionStats(response["clientInfo"]);
                     return;
                     break;
                 default:
@@ -128,4 +112,30 @@ function getCookie(name) {
     var parts = value.split("; " + name + "=");
     if (parts.length == 2)
         return parts.pop().split(";").shift();
+}
+// Render the playlist / client connection counters shown in the top bar
+function renderConnectionStat(elementID, label, active, total) {
+    var element = document.getElementById(elementID);
+    if (!element) {
+        return;
+    }
+    var state = "is-ok";
+    if (total > 0) {
+        var ratio = active / total;
+        if (ratio >= 0.8) {
+            state = "is-danger";
+        }
+        else if (ratio >= 0.6) {
+            state = "is-warn";
+        }
+    }
+    element.className = "stat " + state;
+    element.innerHTML = "<span class='stat-dot'></span><span class='stat-label'>" + label + "</span><span class='stat-value'>" + active + " / " + total + "</span>";
+}
+function renderConnectionStats(clientInfo) {
+    if (!clientInfo) {
+        return;
+    }
+    renderConnectionStat("playlist-connection-information", "Playlist connections", clientInfo["activePlaylist"], clientInfo["totalPlaylist"]);
+    renderConnectionStat("client-connection-information", "Client connections", clientInfo["activeClients"], clientInfo["totalClients"]);
 }

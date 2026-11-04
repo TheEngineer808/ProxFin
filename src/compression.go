@@ -4,28 +4,45 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func zipFiles(sourceFiles []string, target string) error {
+func zipFiles(sourceFiles []string, target string) (err error) {
 
 	zipfile, err := os.Create(target)
 	if err != nil {
 		return err
 	}
-	defer zipfile.Close()
 
 	archive := zip.NewWriter(zipfile)
-	defer archive.Close()
+
+	// A backup that failed half-way (e.g. the disk is full) must be
+	// reported as failed and not left behind looking like a good one.
+	defer func() {
+		if closeErr := archive.Close(); err == nil {
+			err = closeErr
+		}
+		if closeErr := zipfile.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Remove(target)
+		}
+	}()
 
 	for _, source := range sourceFiles {
 
 		info, err := os.Stat(source)
+		if os.IsNotExist(err) {
+			// Optional files (e.g. pms.json) may not exist: back up the rest.
+			continue
+		}
 		if err != nil {
-			return nil
+			return err
 		}
 
 		var baseDir string
@@ -33,7 +50,7 @@ func zipFiles(sourceFiles []string, target string) error {
 			baseDir = filepath.Base(System.Folder.Data)
 		}
 
-		filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 
 			if err != nil {
 				return err
@@ -75,9 +92,13 @@ func zipFiles(sourceFiles []string, target string) error {
 
 		})
 
+		if err != nil {
+			return err
+		}
+
 	}
 
-	return err
+	return nil
 }
 
 func extractZIP(archive, target string) (err error) {
@@ -86,38 +107,58 @@ func extractZIP(archive, target string) (err error) {
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 
 	if err := os.MkdirAll(target, 0755); err != nil {
 		return err
 	}
 
 	for _, file := range reader.File {
-
-		path := filepath.Join(target, file.Name)
-		if file.FileInfo().IsDir() {
-			os.MkdirAll(path, file.Mode())
-			continue
-		}
-
-		fileReader, err := file.Open()
-		if err != nil {
+		if err := extractZIPFile(file, target); err != nil {
 			return err
 		}
-		defer fileReader.Close()
-
-		targetFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
-		if err != nil {
-			return err
-		}
-		defer targetFile.Close()
-
-		if _, err := io.Copy(targetFile, fileReader); err != nil {
-			return err
-		}
-
 	}
 
 	return
+}
+
+// extractZIPFile extracts one archive entry below target. Entries that
+// would end up outside it ("../", absolute paths) are rejected: backups
+// are uploaded through the web interface.
+func extractZIPFile(file *zip.File, target string) error {
+
+	path := filepath.Join(target, file.Name)
+
+	rel, err := filepath.Rel(target, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(file.Name) {
+		return fmt.Errorf("invalid file path in archive: %s", file.Name)
+	}
+
+	if file.FileInfo().IsDir() {
+		return os.MkdirAll(path, 0755)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+
+	fileReader, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer fileReader.Close()
+
+	targetFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode().Perm())
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(targetFile, fileReader); err != nil {
+		targetFile.Close()
+		return err
+	}
+
+	return targetFile.Close()
 }
 
 func extractGZIP(gzipBody []byte, fileSource string) (body []byte, err error) {
@@ -171,15 +212,21 @@ func compressGZIPFile(sourcePath, targetPath string) (err error) {
 	}
 	defer in.Close()
 
-	out, err := os.Create(targetPath)
+	// Renamed into place when complete, like the XML file itself.
+	out, err := createAtomic(targetPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer out.Discard()
 
 	gw := gzip.NewWriter(out)
-	defer gw.Close()
+	if _, err = io.Copy(gw, in); err != nil {
+		return err
+	}
+	// Close writes the gzip footer; an error here means a broken file.
+	if err = gw.Close(); err != nil {
+		return err
+	}
 
-	_, err = io.Copy(gw, in)
-	return err
+	return out.Commit()
 }

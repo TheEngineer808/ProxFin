@@ -1,92 +1,304 @@
-<div align="center" style="background-color: #111; padding: 100;">
-    <a href="https://github.com/Threadfin/Threadfin"><img width="285" height="80" src="html/img/threadfin.png" alt="Threadfin" /></a>
+<div align="center">
+
+<img src="html/img/threadfin.png" width="285" height="80" alt="Threadfin" />
+
+### M3U proxy for Plex DVR, Emby and Jellyfin Live TV
+#### with a stream buffer rebuilt from the ground up
+
+![License: MIT](https://img.shields.io/badge/license-MIT-orange)
+![Go 1.22+](https://img.shields.io/badge/go-1.22%2B-00ADD8)
+![Tests](https://img.shields.io/badge/tests-108%20passing%20(race%20detector)-3ecf8e)
+
 </div>
-<br>
 
-# Threadfin
-## M3U Proxy for Plex DVR and Emby/Jellyfin Live TV. Based on xTeVe.
+> **A community rebuild of [Threadfin](https://github.com/Threadfin/Threadfin), which is itself based on [xTeVe](https://github.com/xteve-project/xTeVe).**
+> Threadfin and xTeVe did the hard work of making IPTV playlists usable in Plex, Emby and Jellyfin. This project builds on their code, and all credit for the original goes to their authors. See [Credits](#credits).
 
-You can follow the old xTeVe documentation for now until I update it for Threadfin. Documentation for setup and configuration is [here](https://github.com/xteve-project/xTeVe-Documentation/blob/master/en/configuration.md).
-
-### Donation
-[Github Sponsor](https://github.com/sponsors/Fyb3roptik)
-
-### Support
-- [Discord](https://discord.gg/CNaSkER2zD)
-
-## Requirements
-### Plex
-* Plex Media Server (1.11.1.4730 or newer)
-* Plex Client with DVR support
-* Plex Pass
-
-### Emby
-* Emby Server (3.5.3.0 or newer)
-* Emby Client with Live-TV support
-* Emby Premiere
-
-### Jellyfin
-* Jellyfin Server (10.7.1 or newer)
-* Jellyfin Client with Live-TV support
-
---- 
-
-## Threadfin Features
-
-* New Bootstrap based UI
-* RAM based buffer instead of File based
-
-#### Filter Group
-* Can now add a starting channel number for the filter group
-
-#### Map Editor
-* Can now multi select Bulk Edit by holding shift
-* Now has a separate table for inactive channels
-* Can add 3 backup channels for an active channel (backup channels do NOT have to be active)
-* Alpha Numeric sorting now sorts correctly
-* Can now add a starting channel number for Bulk Edit to renumber multiple channels at a time
-* PPV channels can now map the channel name to an EPG
-* Removed old Threadfin buffer option, since FFMPEG/VLC will always be a better solution
-
-## xTeVe Features
-
-#### Files
-* Merge external M3U files
-* Merge external XMLTV files
-* Automatic M3U and XMLTV update
-* M3U and XMLTV export
-
-#### Channel management
-* Filtering streams
-* Channel mapping
-* Channel order
-* Channel logos
-* Channel categories
-
-#### Streaming
-* Buffer with HLS / M3U8 support
-* Re-streaming
-* Number of tuners adjustable
-* Compatible with Plex / Emby / Jellyfin EPG
+![Channel mapping](docs/screenshots/mapping.png)
 
 ---
 
-## Docker Image
-[Threadfin](https://hub.docker.com/r/fyb3roptik/threadfin)
+## Contents
 
-* Docker compose example
+- [What's different](#whats-different)
+- [The stream buffer, rebuilt](#the-stream-buffer-rebuilt)
+- [A new web interface](#a-new-web-interface)
+- [Stability, data safety and security fixes](#stability-data-safety-and-security-fixes)
+- [Performance](#performance)
+- [Features](#features)
+- [Installation](#installation)
+- [Upgrading from Threadfin](#upgrading-from-threadfin)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+- [Credits](#credits)
+- [License](#license)
 
+---
+
+## What's different
+
+Threadfin presents your IPTV playlists and XMLTV guides to Plex, Emby and Jellyfin as a network TV tuner. This fork keeps everything it does and changes three things:
+
+1. **The stream buffer was rewritten from scratch.** The old buffer wrote 512 KB segment files to disk and polled them. The new one shares one FFmpeg/VLC process per channel through an in-memory buffer, starts every viewer on a clean keyframe, and survives source dropouts without disconnecting anyone.
+2. **The web interface was redesigned.** It has a sidebar app shell, a consistent dark theme and a layout that works on a phone.
+3. **The whole codebase was audited** for crashes, leaks, data loss and performance cliffs, and every problem found was fixed with a regression test.
+
+|  | Before | Now |
+|---|---|---|
+| Stream delivery | 512 KB segment files, polled every 100 ms | Shared in-memory buffer, data delivered as FFmpeg produces it |
+| Viewer joining a running channel | Undecodable first frame, 16 decode errors, about 11 s behind live | Starts on a keyframe, first byte after about 1 ms, 0 decode errors |
+| Playlists larger than 10 MB | Loaded as **0 channels**, and their mappings were deleted | Parsed correctly |
+| First import of 2,000 channels | 52 s | 0.1 s |
+| 200 open web UI requests | 92 sockets left open on the server | 0 |
+| Automated tests | 1 | **108** plus 11 benchmarks, all run with Go's race detector |
+
+---
+
+## The stream buffer, rebuilt
+
+The buffer is the heart of a tuner proxy: everything a viewer sees goes through it. The original design ran an FFmpeg/VLC process, had it write numbered segment files into a temporary folder, and let every viewer poll that folder. That design caused freezes on failover, stalls that never timed out, races that could crash the process, and viewers joining mid-GOP with corrupt video.
+
+It has been replaced by a new package, [`src/internal/streambuf`](src/internal/streambuf), written for live MPEG-TS.
+
+```mermaid
+flowchart LR
+    P[(IPTV provider)] -->|one connection per channel| F["FFmpeg / VLC<br/>(own process group)"]
+    F -->|stdout| K["TS packetizer<br/>188-byte alignment, resync"]
+    K --> I["Inspector<br/>PAT/PMT, video keyframes"]
+    I --> R[("Shared in-memory buffer<br/>pooled, reference-counted chunks")]
+    R -->|"join: PAT/PMT + keyframe + cushion"| V1[Plex]
+    R --> V2[Jellyfin]
+    R --> V3[Emby / VLC / Kodi]
+    S{{"Supervisor<br/>watchdog, reconnect, failover"}} -.-> F
 ```
-version: "2.3"
+
+### How it works
+
+- **One process per channel, shared by every viewer.** Ten people watching the same channel use one upstream connection and one FFmpeg process.
+- **Data arrives as it is produced.** Output reaches viewers in pieces of at most 100 ms or 64 KB, instead of in 512 KB segment files. Low-bitrate channels no longer arrive in 2-second lumps.
+- **Clean joins.** A viewer joining a running channel gets the PAT/PMT tables first, then starts on a video keyframe, and immediately receives a cushion of buffered video (the *Buffer Size* setting).
+  - Keyframes are taken from video PIDs only, because FFmpeg flags every audio packet as random access too.
+- **Proper MPEG-TS handling.** Output is cut into whole 188-byte packets, corrupt input is resynchronised, and non-TS output is passed through untouched.
+- **Slow viewers can't hurt anyone else.** A viewer that falls 15 s behind is moved to the live position, and the channel and other viewers carry on.
+
+### Reliability
+
+- **Failover without disconnects.**
+  - A supervisor loop reconnects a source that was streaming healthily, then tries the backup channels in order. Viewers stay connected throughout.
+  - Backups on another playlist use that playlist's tuners, proxy and headers.
+- **Short outages are ridden out.** A channel with no backups gets a few reconnect attempts, with growing pauses, before viewers are released.
+  - It used to drop everyone about 0.5 s into an outage. It now survives about 5 s, still within a bounded number of attempts.
+  - A channel that never started still fails at once.
+- **Stalls are detected.** A source that sends nothing for 15 s (20 s at start) is replaced. The old buffer could hang forever on a blocked read.
+- **Tuner limits that behave.**
+  - A stream keeps running for 5 s after its last viewer leaves, so the probe-then-reconnect pattern Plex uses reuses it.
+  - A lingering stream gives up its tuner the moment another channel needs it. Switching channels with a single tuner used to wait 2.0 s and now takes 0.05 s.
+  - When every tuner is busy, viewers get the "tuner limit reached" clip.
+- **Correct errors.** A channel that cannot start returns `503`, as a real HDHomeRun does, instead of an empty video. Clients that accept no data for 60 s are disconnected so their tuner is freed.
+- **One lock, no races.** Streams and tuners are managed under a single mutex: there are no shared maps, no duplicate processes on simultaneous tunes, and no mixed-up channels.
+
+### Process and resource safety
+
+- FFmpeg and VLC run in their own process group, and are always killed together with their children. Their stderr is always drained, and its last lines are logged when a process fails.
+- **Graceful shutdown.** On `SIGINT` or `SIGTERM` (Ctrl+C, `docker stop`, systemd) every stream is stopped before Threadfin exits. Previously FFmpeg processes could outlive Threadfin and keep holding provider connections.
+- Chunk memory is pooled and reference-counted, so the garbage collector has almost nothing to do: **0 GC cycles in 20 s** under load, against 15 for the old buffer.
+- Viewers waiting for the next batch are woken once per batch instead of once per chunk. A channel with 200 viewers uses 2–4× less CPU.
+- Write buffers are pooled across connections. A connect-and-leave (Plex probes every channel) allocates 31 KB instead of 289 KB.
+
+### Smarter FFmpeg defaults
+
+- The default options map video and audio as optional (`0:v?`, `0:a:0?`), so radio and video-only channels work. They used to produce no output.
+- HTTP(S) sources get FFmpeg's reconnect options, so a dropped connection resumes inside FFmpeg.
+  - Only options the installed FFmpeg supports are used.
+  - They are never applied to non-HTTP inputs, where they are fatal.
+- New installs use `jellyfin-ffmpeg` when it is present, which the Docker image installs.
+- Installs still using the old default options are migrated automatically. Custom options are left alone.
+
+### Measured
+
+| Scenario | Old buffer | New buffer |
+|---|---|---|
+| 20 channels × 5 viewers, 8 Mbps, Threadfin's own CPU | 18.6 % of a core | 16.9 % of a core |
+| Garbage collections in 20 s under that load | 15 | **0** |
+| Viewer joining a running channel (real FFmpeg) | Undecodable first frame, 16 decode errors, about 11 s behind live | First byte after about 1 ms, starts on an I-frame, 0 decode errors |
+| Failover to a backup | 3.2 s freeze | Viewers stay connected |
+| Source exits or stalls | Response still open 12 s / 30 s later | Detected and handled |
+
+### Tested
+
+The buffer has unit tests for packetizing, PAT/PMT parsing (including real FFmpeg output), joins, failover, stalls, tuner accounting, linger, slow viewers and pooled-memory reuse (with poisoned releases, to catch use-after-free). Integration tests run the real HTTP handler against a fake FFmpeg, and against real FFmpeg with the captured output decoded.
+
+A churn test tunes in and out repeatedly against healthy, dropping, stalling and failing sources. It then checks that goroutines, heap, registered streams and child processes all return to their baseline. A load test is available on request (see [Development](#development)).
+
+---
+
+## A new web interface
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/filters.png" alt="Filters with live preview of active and inactive streams" /></td>
+    <td width="50%"><img src="docs/screenshots/channel-editor.png" alt="Channel editor" /></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/settings.png" alt="Settings grouped into cards" /></td>
+    <td><img src="docs/screenshots/login.png" alt="Login" /></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/mobile-mapping.png" width="260" alt="Mapping on a phone" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-menu.png" width="260" alt="Navigation on a phone" />
+</p>
+
+- **App shell:** a sidebar with icons and an active state, plus a sticky top bar showing the page title, a description, and live playlist and client connection counters.
+- **Dark theme:** one consistent colour system, with clear primary actions, focus rings and custom checkboxes.
+- **Data tables:** headers stay visible while you scroll, channel logos are proper thumbnails, the EPG status shows on every row, and inactive channels have their own section.
+- **Settings:** grouped into cards. The log is a scrollable console. Dialogs are clean, and the server information page has copy buttons.
+- **Login, first-user and setup-wizard pages:** redesigned as centred cards.
+- **Works on phones:** the menu slides out and wide tables scroll sideways.
+- **Opens on the Playlist page** instead of an empty screen.
+
+---
+
+## Stability, data safety and security fixes
+
+Every item below was found in a full review of the codebase. Each fix comes with a test, and each test was confirmed to fail on the old code.
+
+### Crashes that took the whole process down
+
+Go cannot recover from a concurrent map write, so each of these killed Threadfin and every stream with it.
+
+- **Overlapping logins:** Plex fetching `/lineup.json` while another client fetched `/xmltv/` was enough. The authentication maps are now locked.
+- **A tune during a playlist refresh:** the refresh runs at 00:00 by default, when recordings often start. Provider settings are now guarded by a read/write lock.
+- **A scheduled refresh overlapping "Update" in the web UI**, or an API update call. Refreshes are now serialised.
+- **The update check:** a missing or unparseable release (for example a fork with no releases) dereferenced a nil version. This happened at startup, so Threadfin never started, or at the daily update time.
+- **Malformed HDHomeRun tuner data** in the maintenance goroutine.
+
+### Data loss
+
+- **Playlists over 10 MB loaded as zero channels.** A second "optimized" parser dropped every entry. The empty result was saved over the playlist and the cleanup deleted all of its channel mappings. There is now one parser for every size, with its patterns compiled once.
+- **One unreadable playlist silently dropped the next one,** whose mappings were then deleted, and loaded the last one twice.
+- **The PPV endpoints could overwrite `xepg.json` with `null`,** wiping every channel mapping.
+- **A crash or power loss while saving could leave `settings.json` empty,** and Threadfin would not start again.
+  - Settings, mappings, the user database, playlists and guides are now written to a temporary file and renamed into place.
+- **`threadfin.xml.gz` was always missing up to its last megabyte,** including `</tv>`.
+- **The served playlist and guide could be fetched half-written** during a rebuild. They are now replaced atomically.
+- **Backups:**
+  - A missing file ended the backup early but reported success.
+  - Errors from a full disk were ignored.
+  - Restores held a file handle per archive entry.
+
+### Leaks and stalls
+
+- **Web UI websockets were never closed,** by either side. The UI opens one per request, every 10 seconds for the log. 200 requests left 92 sockets open on the server; now none are left.
+- **Every JSON save leaked a file descriptor.** This happened once per new channel in PMS mode.
+- **The image cache stalled playlists:**
+  - It downloaded every logo while holding a lock, with no timeout.
+  - It kept every socket and file open until the queue finished.
+  - One unresponsive image host blocked `/m3u/` and the guide build until a restart.
+- **Login tokens never expired from memory,** so every authenticated request added one.
+- **The HTTP server had no timeouts:** slow or idle clients held a connection forever. The web UI websocket now also has a message size limit and a read deadline.
+- **Update requests had no timeout.** They run before the web server starts and inside the scheduler.
+- **The web log** dropped every other message once full, could wipe itself, and was written by many goroutines without a real lock.
+- **A failed filter load left a scan flag set,** silently turning off scheduled updates until a restart.
+- **A dummy guide length of 0** (`0_Minutes`) looped forever.
+
+### Security hardening
+
+- **Backup restore rejects archive entries that escape the target folder** (zip slip).
+- **Uploaded logo file names can no longer write outside the upload folder** (path traversal).
+- **A malformed Basic-auth header** no longer panics the request handler.
+
+### Operations
+
+- Fatal startup errors and crashes exit with code `1`, so systemd's `Restart=on-failure` and Docker restart policies work. They used to exit `0`.
+- SSDP announces a goodbye on shutdown, and no longer starts a second advertiser after a restore.
+- `/xmltv/` streams the guide from disk instead of holding four copies of it in memory per request. It also answers range and conditional requests.
+- An `/m3u/` request with query parameters (such as `username` and `password`) but no `group-title` used to return an empty playlist. It now returns the full one.
+
+---
+
+## Performance
+
+Measured on the code before and after each change.
+
+| Operation | Before | After |
+|---|---|---|
+| First import, 2,000 new channels (20,000 filtered out) | 52.1 s | 0.10 s |
+| Assigning 4,000 new channel numbers | 6.3 s | 1.3 ms |
+| Assigning 20,000 new XEPG IDs | 19.4 s | 6.5 ms |
+| PMS mode `/lineup.json` with new channels | 104 s for 2,000 | 0.11 s for 20,000 |
+| Filtering 5,000 streams through 20 filters | 704 ms | 1.9 ms |
+| Guide data for 200 channels, 50,000 programmes | 580 ms | 21 ms |
+| Parsing a 200,000-channel playlist | 2.56 s, 1.5 GB allocated | 1.34 s, 0.43 GB allocated |
+| Checking a 112 MB XMLTV download, peak heap | +460 MB | +194 MB |
+| Building a 20,000-channel group playlist | 4.6 s | 1.0 s |
+| `/xmltv/` memory per request, 48 MB guide | 192 MB | streamed |
+| CPU, one channel with 200 viewers | 1.8–2.2 s per 3 s | 0.4 s per 3 s |
+
+---
+
+## Features
+
+Everything from Threadfin and xTeVe is still here.
+
+**Files**
+- Merge multiple M3U playlists, HDHomeRun tuners and XMLTV guides
+- Automatic scheduled updates, with backups before each update
+- M3U and XMLTV export, plus a filtered M3U per group (`?group-title=News,Sports`)
+
+**Channel management**
+- Filter streams by group or by custom rules (include/exclude, case sensitivity), with a starting channel number per filter group
+- Channel mapping with a live preview, bulk edit (Shift to multi-select, renumber from a starting number), and a separate table for inactive channels
+- Up to 3 backup channels per channel
+- Channel logos, EPG categories, and dummy guides including PPV channels mapped by name
+
+**Streaming**
+- FFmpeg or VLC buffer, or direct redirect, with HLS / M3U8 support
+- Tuner count per playlist
+- Compatible with the Plex, Emby and Jellyfin EPG
+
+### Requirements
+
+| Client | Version |
+|---|---|
+| Plex | Plex Media Server 1.11.1.4730 or newer, a client with DVR support, and Plex Pass |
+| Emby | Emby Server 3.5.3.0 or newer, a client with Live TV support, and Emby Premiere |
+| Jellyfin | Jellyfin Server 10.7.1 or newer, and a client with Live TV support |
+
+---
+
+## Installation
+
+> [!IMPORTANT]
+> **Turn off *Automatic update of Threadfin*** (Settings → General) when running this build. The updater downloads releases from the repository set in [`threadfin.go`](threadfin.go) (`GitHub`), which still points at upstream Threadfin. A newer upstream release would replace this build.
+>
+> The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin and does **not** include these changes. Build the image from this repository.
+
+### Docker
+
+```bash
+docker build -t threadfin .
+```
+
+For NVIDIA hardware transcoding:
+
+```bash
+docker build --build-arg USE_NVIDIA=1 -t threadfin:nvidia .
+```
+
+`docker-compose.yml`:
+
+```yaml
 services:
   threadfin:
-    image: fyb3roptik/threadfin
+    build: .
+    image: threadfin
     container_name: threadfin
     ports:
       - 34400:34400
     environment:
-      - PUID=1001
-      - PGID=1001
       - TZ=America/Los_Angeles
     volumes:
       - ./data/conf:/home/threadfin/conf
@@ -94,101 +306,137 @@ services:
     restart: unless-stopped
 ```
 
----                                                                                             
+The image includes FFmpeg (`jellyfin-ffmpeg` where available) and VLC. Open `http://<host>:34400/web/`.
 
-## Helm Chart on Kubernetes using TrueCharts
-[Threadfin](https://truecharts.org/charts/stable/threadfin/)
+### From source
 
-* Helm-Chart Installation
-```helm install threadfin oci://tccr.io/truecharts/threadfin```
+Requires [Go](https://go.dev) 1.22 or newer.
+
+```bash
+go build -mod=mod -o threadfin .
+```
+
+```bash
+./threadfin -port 34400
+```
+
+| Flag | Description |
+|---|---|
+| `-port` | Web server port (default `34400`) |
+| `-config` | Configuration folder (default `~/.threadfin/`) |
+| `-bind` | IP address to bind to |
+| `-restore` | Restore a backup: `-restore /path/threadfin_backup.zip` |
+| `-debug` | Debug level `0`–`3` |
+| `-info` | Show system information and exit |
+| `-dev` | Developer mode: serve the web interface from `html/` and regenerate the embedded copy |
+| `-branch` | Git branch used by the updater |
+
+Threadfin stops its streams and exits cleanly on `SIGINT` or `SIGTERM`.
 
 ---
 
-### Threadfin Beta branch
-New features and bug fixes are only available in beta branch. Only after successful testing are they are merged into the main branch.
+## Upgrading from Threadfin
 
-**It is not recommended to use the beta version in a production system.**  
+This build uses the same configuration folder and files. Point it at your existing folder (`-config`, or the same Docker volume) and it carries on:
 
-With the command line argument `branch` the Git Branch can be changed. Threadfin must be started via the terminal.  
+- Playlists, guides, filters, mappings and users are kept.
+- FFmpeg options still set to the old default are migrated to the new default. Custom options are not touched.
+- Playlists set to the removed "Threadfin" buffer use FFmpeg.
 
-#### Switch from master to beta branch:
-```
-threadfin -branch beta
-
-...
-[Threadfin] GitHub:                https://github.com/Threadfin/Threadfin
-[Threadfin] Git Branch:            beta [Threadfin]
-...
-```
-
-#### Switch from beta to master branch:
-```
-threadfin -branch main
-
-...
-[Threadfin] GitHub:                https://github.com/Threadfin/Threadfin
-[Threadfin] Git Branch:            main [Threadfin]
-...
-```
-
-When the branch is changed, an update is only performed if there is a new version and the update function is activated in the settings.  
+Make a backup first (Settings → Backup) so you can go back.
 
 ---
 
-## Build from source code [Go / Golang]
+## Development
 
-#### Requirements
-* [Go](https://golang.org) (go1.18 or newer)
+### Layout
 
-#### Dependencies
-* [go-ssdp](https://github.com/koron/go-ssdp)
-* [websocket](https://github.com/gorilla/websocket)
-* [osext](https://github.com/kardianos/osext)
-* [avfs](github.com/avfs/avfs)
+| Path | Contents |
+|---|---|
+| `src/internal/streambuf/` | The stream buffer: sessions, tuners, ring buffer, TS packetizer and inspector, memory pool |
+| `src/buffer*.go` | The buffer's HTTP side: tuning, FFmpeg/VLC processes, the tuner-limit clip |
+| `src/internal/m3u-parser/` | M3U playlist parser |
+| `src/xepg.go`, `src/data.go`, `src/m3u.go` | Playlist, guide and channel-database pipeline |
+| `src/webserver.go` | HTTP endpoints and the web UI websocket |
+| `ts/`, `html/` | Web interface (TypeScript sources and the compiled site) |
+| `src/webUI.go` | Generated copy of `html/` embedded in the binary |
 
-#### Build
-1. Download source code
-2. Install dependencies
-```
-go mod tidy && go mod vendor
-```
-3. Build Threadfin
-```
-go build threadfin.go
-```
+### Web interface
 
-4. Update web files (optional)
+The TypeScript in `ts/` compiles to `html/js/`:
 
-If TypeScript files were changed, run:
-
-```sh
-tsc -p ./ts/tsconfig.json
+```bash
+cd ts && tsc -p tsconfig.json --strict false --alwaysStrict false
 ```
 
-Then, to embed updated JavaScript files into the source code (src/webUI.go), run it in development mode at least once:
+The flags keep the output identical to the committed JavaScript with TypeScript 6. Release builds serve an embedded copy of `html/` from `src/webUI.go`. Regenerate it by starting a build once in developer mode:
 
-```sh
-go build threadfin.go
-threadfin -dev
+```bash
+go build -mod=mod -o threadfin . && ./threadfin -dev
 ```
+
+### Tests
+
+```bash
+go test -mod=mod -race ./...
+```
+
+- The buffer's integration tests start real processes, using a fake FFmpeg shell script. `-short` skips them.
+- The load test drives real 8 Mbps FFmpeg streams through the buffer with `curl` viewers, and reports Threadfin's CPU usage:
+
+```bash
+THREADFIN_LOAD_TEST=1 CHANNELS=20 VIEWERS=5 SECONDS=20 go test -mod=mod ./src/ -run TestBufferLoad -v -timeout 10m
+```
+
+- Benchmarks:
+
+```bash
+go test -mod=mod -run '^$' -bench . ./src/internal/streambuf/ ./src/
+```
+
+The `vendor/` folder is out of date, which is why `-mod=mod` is needed.
+
+### Forks
+
+To publish a fork, point the `GitHub` variable in [`threadfin.go`](threadfin.go) at your repository, or set `Update: false`. Otherwise installs of your fork update themselves to upstream releases.
 
 ---
 
-## Fork without pull request :mega:
-When creating a fork, the Threadfin GitHub account must be changed from the source code or the update function disabled.
-Future updates of Threadfin would update your fork.
+## Known limitations
 
-threadfin.go - Line: 29
-```Go
-var GitHub = GitHubStruct{Branch: "main", User: "Threadfin", Repo: "Threadfin", Update: true}
+These were found in the review and are not fixed yet:
 
-/*
-  Branch: GitHub Branch
-  User:   GitHub Username
-  Repo:   GitHub Repository
-  Update: Automatic updates from the GitHub repository [true|false]
-*/
+- **Keep the web interface on a trusted network.**
+  - The web interface's websocket accepts connections from any origin, so with web authentication off (the default), a web page opened by someone on your network could change Threadfin's settings.
+  - Enable *Web Authentication*, and don't expose port 34400 to the internet.
+  - With authentication off, the stored password hashes are also sent to the web interface.
+- **Memory:** the parsed guide is kept in memory, at about 2.4× the size of the XMLTV files. A streaming guide writer is planned.
+- **Updating one playlist from the web interface refreshes every playlist and guide.**
+- **No global memory limit for stream buffers:** each channel holds up to 48 MB or 15 s.
+- **On Windows, stopping a stream kills FFmpeg/VLC but not processes they started themselves.**
 
-```
+---
 
+## Credits
 
+This project would not exist without:
+
+- **[Threadfin](https://github.com/Threadfin/Threadfin)** by [Fyb3roptik](https://github.com/Fyb3roptik) and contributors. It is the codebase this project is built on: the Bootstrap UI, backup channels, filter-group channel numbers, the mapping editor improvements, and years of fixes.
+- **[xTeVe](https://github.com/xteve-project/xTeVe)**, the original M3U proxy that Threadfin was based on. Its [documentation](https://github.com/xteve-project/xTeVe-Documentation/blob/master/en/configuration.md) is still the best guide to configuration.
+
+Please report problems with this build here, not to the Threadfin or xTeVe projects.
+
+It also uses:
+- [go-ssdp](https://github.com/koron/go-ssdp)
+- [gorilla/websocket](https://github.com/gorilla/websocket)
+- [go-version](https://github.com/hashicorp/go-version)
+- [osext](https://github.com/kardianos/osext)
+- [avfs](https://github.com/avfs/avfs)
+- [Bootstrap](https://getbootstrap.com)
+- [Font Awesome](https://fontawesome.com)
+- [clipboard.js](https://clipboardjs.com)
+- [FFmpeg](https://ffmpeg.org) and [VLC](https://www.videolan.org)
+
+## License
+
+[MIT](LICENSE). The original copyright notice is kept in [`LICENSE`](LICENSE) and must stay with any copy or redistribution.

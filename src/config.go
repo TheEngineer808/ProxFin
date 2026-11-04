@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/avfs/avfs"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -27,24 +26,32 @@ var Data DataStruct
 // SystemFiles : Alle Systemdateien
 var SystemFiles = []string{"authentication.json", "pms.json", "settings.json", "xepg.json", "urls.json"}
 
-// BufferInformation : Informationen über den Buffer (aktive Streams, maximale Streams)
-var BufferInformation sync.Map
-
-// bufferVFS : Filesystem to use for the Buffer
-var bufferVFS avfs.VFS
-
-// BufferClients : Anzahl der Clients die einen Stream über den Buffer abspielen
-var BufferClients sync.Map
-
-// Lock : Lock Map
-var Lock = sync.RWMutex{}
-
 var (
 	xepgMutex   sync.Mutex
-	infoMutex   sync.Mutex
 	logMutex    sync.Mutex
 	systemMutex sync.Mutex
+
+	// refreshMutex serialises refreshing the provider files and rebuilding
+	// the databases from them. The scheduled update, the web UI and the API
+	// all run this pipeline, which writes the same maps (Settings.Files,
+	// Data.Streams, Data.XEPG); two runs at once crashed the process with
+	// "concurrent map writes". Only the entry points take it.
+	refreshMutex sync.Mutex
+
+	// providerMutex guards the provider entries in Settings.Files (M3U,
+	// HDHR, XMLTV). A refresh updates them in place (counters, last update,
+	// compatibility) while streams read them when tuning; a map read during
+	// a write is fatal. Writers hold it only for the update itself, never
+	// during a download or parse.
+	providerMutex sync.RWMutex
 )
+
+// withProviders runs f with providerMutex held for writing.
+func withProviders(f func()) {
+	providerMutex.Lock()
+	defer providerMutex.Unlock()
+	f()
+}
 
 // Init : Systeminitialisierung
 func Init() (err error) {
@@ -65,7 +72,7 @@ func Init() (err error) {
 	System.Compatibility = "0.1.0"
 
 	// FFmpeg Default Einstellungen
-	System.FFmpeg.DefaultOptions = "-hide_banner -loglevel error -analyzeduration 1000000 -probesize 1000000 -i [URL] -map 0:v -map 0:a:0 -c:v copy -c:a aac -b:a 192k -ac 2 -c:s copy -f mpegts -fflags +genpts -movflags +faststart -copyts pipe:1"
+	System.FFmpeg.DefaultOptions = defaultFFmpegOptions
 	System.VLC.DefaultOptions = "-I dummy [URL] --sout #std{mux=ts,access=file,dst=-}"
 
 	// Default Logeinträge, wird später von denen aus der settings.json überschrieben. Muss gemacht werden, damit die ersten Einträge auch im Log (webUI aangezeigt werden)

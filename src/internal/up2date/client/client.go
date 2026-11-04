@@ -41,10 +41,15 @@ var Updater ClientInfo
 // UpdateURL : URL for the new binary
 var UpdateURL string
 
+// requestTimeout bounds every request to the update server, so a stalled
+// server can't block the caller (startup, or the maintenance scheduler).
+const requestTimeout = 30 * time.Second
+
 // Init : Init
 func Init() {
 	Updater.OS = runtime.GOOS
 	Updater.Arch = runtime.GOARCH
+	removeOldBinary()
 }
 
 // GetVersion : Information about the latest version
@@ -69,51 +74,63 @@ func serverRequest() (err error) {
 		var server = u.Host
 
 		timeout := time.Duration(1 * time.Second)
-		_, err = net.DialTimeout("tcp", server, timeout)
+		conn, err := net.DialTimeout("tcp", server, timeout)
+		if err != nil {
+			return err
+		}
+		conn.Close()
+
+		// Check redirect 301 <---> 308
+		redirect, err := http.NewRequest("POST", Updater.URL, nil)
 		if err != nil {
 			return err
 		}
 
-		// Check redirect 301 <---> 308
-		redirect, err := http.NewRequest("POST", Updater.URL, nil)
-
-		client := &http.Client{}
-		client.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
-			return errors.New("Redirect")
+		client := &http.Client{
+			Timeout: requestTimeout,
+			CheckRedirect: func(redirect *http.Request, via []*http.Request) error {
+				return errors.New("Redirect")
+			},
 		}
 
 		resp, err := client.Do(redirect)
+		if resp != nil {
+			resp.Body.Close()
+		}
 
 		if err != nil {
-			// Redirect
-			if resp.StatusCode >= 301 && resp.StatusCode <= 308 { //status code 301 <---> 308
-				Updater.URL = resp.Header.Get("Location")
-			} else {
+			// Redirect (status code 301 <---> 308). Any other error has no
+			// response at all.
+			if resp == nil || resp.StatusCode < 301 || resp.StatusCode > 308 {
 				return err
 			}
+			Updater.URL = resp.Header.Get("Location")
 		}
 		// ---
 
 		req, err := http.NewRequest("POST", Updater.URL, bytes.NewBuffer(jsonByte))
-		req.Header.Set("Content-Type", "application/json")
-
-		client = &http.Client{}
-		resp, err = client.Do(req)
-
 		if err != nil {
 			return err
 		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err = (&http.Client{Timeout: requestTimeout}).Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			//fmt.Println(resp.StatusCode, Updater.URL, Updater.CMD)
-			err = fmt.Errorf(fmt.Sprintf("%d: %s (%s)", resp.StatusCode, http.StatusText(resp.StatusCode), Updater.URL))
+			err = fmt.Errorf("%d: %s (%s)", resp.StatusCode, http.StatusText(resp.StatusCode), Updater.URL)
 			return err
 		}
 
 		Updater.CMD = ""
-		defer resp.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return err
+		}
 
 		err = json.Unmarshal(body, &serverResponse)
 

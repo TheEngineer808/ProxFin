@@ -1,3 +1,17 @@
+var ACTIVE_MENU_KEY: string
+
+// Font Awesome icons for the main navigation
+var MENU_ICONS: object = {
+  "playlist": "fas fa-list-ul",
+  "xmltv": "fas fa-calendar-alt",
+  "filter": "fas fa-filter",
+  "mapping": "fas fa-project-diagram",
+  "users": "fas fa-users",
+  "settings": "fas fa-cog",
+  "log": "fas fa-terminal",
+  "logout": "fas fa-sign-out-alt"
+}
+
 class MainMenu {
   DocumentID: string = "main-menu"
   HTMLTag: string = "LI"
@@ -37,10 +51,16 @@ class MainMenuItem extends MainMenu {
     item.setAttribute("onclick", "javascript: openThisMenu(this)")
     item.setAttribute("id", this.id)
     item.setAttribute("class", "nav-item")
-    var img = this.createIMG(this.imgSrc)
+    item.setAttribute("title", this.headline)
+    if (ACTIVE_MENU_KEY == this.menuKey) {
+      item.classList.add("active")
+    }
+
+    var icon = document.createElement("I")
+    icon.className = MENU_ICONS[this.menuKey] || "fas fa-circle"
     var value = this.createValue(this.value)
 
-    item.appendChild(img)
+    item.appendChild(icon)
     item.appendChild(value)
 
     var doc = document.getElementById(this.DocumentID)
@@ -829,8 +849,13 @@ class ShowContent extends Content {
       popup_header.appendChild(h)
     }
 
-    var hr = this.createHR()
-    doc.appendChild(hr)
+    ACTIVE_MENU_KEY = menuKey
+    setPageHeader(menuItems[this.menuID].value, menuItems[this.menuID].headline)
+    var navItems = document.querySelectorAll("#main-menu .nav-item")
+    navItems.forEach(navItem => {
+      navItem.classList.toggle("active", navItem.id == String(this.menuID))
+    })
+    document.body.classList.remove("nav-open")
 
     // Interaktion
     var div = this.createInteraction()
@@ -1014,6 +1039,11 @@ class ShowContent extends Content {
       if (menuKey == "mapping") {
 
 
+        var inactiveHeadline = document.createElement("H4")
+        inactiveHeadline.className = "table-section-title"
+        inactiveHeadline.innerHTML = "{{.mapping.inactiveChannels}}"
+        wrapper.appendChild(inactiveHeadline)
+
         var inactivetable = this.createInactiveTABLE()
         wrapper.appendChild(inactivetable)
 
@@ -1120,25 +1150,7 @@ function createLayout() {
 
   }
 
-  if (document.getElementById("playlist-connection-information")) {
-    let activeClass = "text-primary"
-    if (SERVER["clientInfo"]["activePlaylist"] / SERVER["clientInfo"]["totalPlaylist"] >= 0.6 && SERVER["clientInfo"]["activePlaylist"] / SERVER["clientInfo"]["totalPlaylist"] < 0.8) {
-      activeClass = "text-warning"
-    } else if (SERVER["clientInfo"]["activePlaylist"] / SERVER["clientInfo"]["totalPlaylist"] >= 0.8) {
-      activeClass = "text-danger"
-    }
-    document.getElementById("playlist-connection-information").innerHTML = "Playlist Connections: <span class='" + activeClass + "'>" + SERVER["clientInfo"]["activePlaylist"] + " / " + SERVER["clientInfo"]["totalPlaylist"] + "</span>"
-  }
-
-  if (document.getElementById("client-connection-information")) {
-    let activeClass = "text-primary"
-    if (SERVER["clientInfo"]["activeClients"] / SERVER["clientInfo"]["totalClients"] >= 0.6 && SERVER["clientInfo"]["activeClients"] / SERVER["clientInfo"]["totalClients"] < 0.8) {
-      activeClass = "text-warning"
-    } else if (SERVER["clientInfo"]["activeClients"] / SERVER["clientInfo"]["totalClients"] >= 0.8) {
-      activeClass = "text-danger"
-    }
-    document.getElementById("client-connection-information").innerHTML = "Client Connections: <span class='" + activeClass + "'>" + SERVER["clientInfo"]["activeClients"] + " / " + SERVER["clientInfo"]["totalClients"] + "</span>"
-  }
+  renderConnectionStats(SERVER["clientInfo"])
 
   if (!document.getElementById("main-menu")) {
     return
@@ -1173,7 +1185,30 @@ function createLayout() {
 
   }
 
+  // Open the first page on initial load so the content area is never empty
+  if (ACTIVE_MENU_KEY == undefined && !SERVER.hasOwnProperty("openMenu")) {
+    var first = document.querySelector("#main-menu .nav-item") as HTMLElement
+    if (first) {
+      first.click()
+    }
+  }
+
   return
+}
+
+function setPageHeader(title: string, subtitle: string) {
+  var titleElement = document.getElementById("page-title")
+  var subtitleElement = document.getElementById("page-subtitle")
+  if (titleElement) {
+    titleElement.innerHTML = title
+  }
+  if (subtitleElement) {
+    subtitleElement.innerHTML = (subtitle && subtitle != title) ? subtitle : ""
+  }
+}
+
+function toggleNavigation() {
+  document.body.classList.toggle("nav-open")
 }
 
 function openThisMenu(element) {
@@ -1217,7 +1252,7 @@ class PopupContent extends PopupWindow {
   createHeadline(headline): void {
     this.doc.innerHTML = ""
     var element = document.createElement("H3")
-    element.innerHTML = headline.toUpperCase()
+    element.innerHTML = headline
     this.doc.appendChild(element)
 
     // Tabelle erstellen
@@ -2879,7 +2914,9 @@ function showPreview(element: boolean) {
 document.addEventListener("DOMContentLoaded", function() {
   var backToTopButton = document.createElement("button");
   backToTopButton.id = "back-to-top";
-  backToTopButton.innerText = "Back to Top";
+  backToTopButton.innerHTML = "<i class='fas fa-arrow-up'></i>";
+  backToTopButton.setAttribute("aria-label", "Back to top");
+  backToTopButton.setAttribute("title", "Back to top");
   backToTopButton.onclick = function() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };

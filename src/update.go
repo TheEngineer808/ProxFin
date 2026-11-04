@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	up2date "threadfin/src/internal/up2date/client"
 
@@ -47,13 +48,28 @@ func BinaryUpdate() (err error) {
 
 		var git []*GithubReleaseInfo
 
-		resp, err := http.Get(releaseInfo)
+		// Without a timeout a stalled connection would block the start of
+		// Threadfin (this runs before the web server starts) or, later, the
+		// scheduler that refreshes playlists and guides.
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(releaseInfo)
 		if err != nil {
 			ShowError(err, 6003)
 			return nil
 		}
+		defer resp.Body.Close()
 
-		body, _ = io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			// e.g. 403 when the GitHub API rate limit is exceeded
+			ShowError(fmt.Errorf("%s: %s", releaseInfo, resp.Status), 6003)
+			return nil
+		}
+
+		body, err = io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		if err != nil {
+			ShowError(err, 6003)
+			return nil
+		}
 
 		err = json.Unmarshal(body, &git)
 		if err != nil {
@@ -124,8 +140,16 @@ func BinaryUpdate() (err error) {
 	}
 
 	var currentVersion = System.Version + "." + System.Build
-	current_version, _ := version.NewVersion(currentVersion)
-	response_version, _ := version.NewVersion(updater.Response.Version)
+	current_version, errCurrent := version.NewVersion(currentVersion)
+	response_version, errResponse := version.NewVersion(updater.Response.Version)
+
+	// No usable version to compare against (no matching release, or a server
+	// without a version): nothing to update. Comparing a nil version panics.
+	if errCurrent != nil || errResponse != nil {
+		showInfo(fmt.Sprintf("Update:No valid version available (%q)", updater.Response.Version))
+		return nil
+	}
+
 	// Versionsnummer überprüfen
 	if response_version.GreaterThan(current_version) && updater.Response.Status {
 		if Settings.ThreadfinAutoUpdate {

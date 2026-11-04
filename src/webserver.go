@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"threadfin/src/internal/authentication"
 
@@ -54,12 +55,33 @@ func StartWebserver() (err error) {
 	}
 	systemMutex.Unlock()
 
-	if err = http.ListenAndServe(ipAddress+":"+port, nil); err != nil {
+	if err = newHTTPServer(ipAddress+":"+port, nil).ListenAndServe(); err != nil {
 		ShowError(err, 1001)
 		return
 	}
 
 	return
+}
+
+// Timeouts of the HTTP server. There is deliberately no read or write
+// timeout for whole requests: streams last for hours and websocket
+// requests are hijacked.
+var (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 2 * time.Minute
+)
+
+// newHTTPServer returns the HTTP server for addr. http.ListenAndServe has no
+// timeouts at all, so a client that sends its headers slowly, or keeps an
+// idle keep-alive connection open, held a connection and a goroutine
+// forever.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
 }
 
 // Index : Web Server /
@@ -151,31 +173,13 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "HEAD" {
-		client := &http.Client{}
-		req, err := http.NewRequest("HEAD", streamInfo.URL, nil)
-		if err != nil {
-			ShowError(err, 1501)
-			httpStatusError(w, r, 405)
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			ShowError(err, 1502)
-			httpStatusError(w, r, 405)
-			return
-		}
-		defer resp.Body.Close()
-		// Copy headers from the source HEAD response to the outgoing response
-		for key, values := range resp.Header {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
+		streamHEAD(w, r, streamInfo.URL)
 		return
 	}
 
 	var playListBuffer string
 	systemMutex.Lock()
+	providerMutex.RLock()
 	playListInterface := Settings.Files.M3U[streamInfo.PlaylistID]
 	if playListInterface == nil {
 		playListInterface = Settings.Files.HDHR[streamInfo.PlaylistID]
@@ -188,6 +192,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	providerMutex.RUnlock()
 	systemMutex.Unlock()
 
 	switch playListBuffer {
@@ -261,11 +266,31 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		file = System.Folder.Data + getFilenameFromPath(path)
 		systemMutex.Unlock()
 
-		content, err = readStringFromFile(file)
+		// Stream the file instead of reading it into memory: guides are
+		// often hundreds of MB, and the string and []byte conversions held
+		// four copies per request. ServeContent also answers conditional
+		// and range requests.
+		f, err := os.Open(file)
 		if err != nil {
 			httpStatusError(w, r, 404)
 			return
 		}
+		defer f.Close()
+
+		info, err := f.Stat()
+		if err != nil || info.IsDir() {
+			httpStatusError(w, r, 404)
+			return
+		}
+
+		if strings.HasSuffix(strings.ToLower(file), ".gz") {
+			w.Header().Set("Content-Type", "application/x-gzip")
+		} else {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		}
+
+		http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+		return
 
 	}
 
@@ -287,17 +312,24 @@ func Threadfin(w http.ResponseWriter, r *http.Request) {
 		m3uFilePath := System.Folder.Data + "threadfin.m3u"
 		systemMutex.Unlock()
 
-		queries := r.URL.Query()
-		// Check if the m3u file exists
-		if len(queries) == 0 {
-			if _, err := os.Stat(m3uFilePath); err == nil {
-				log.Println("Serving existing m3u file")
-				http.ServeFile(w, r, m3uFilePath)
-				return
+		// Without a group filter the whole playlist is served from the file
+		// (other query parameters, e.g. username and password when M3U
+		// authentication is on, don't change it). buildM3U only writes the
+		// file in that case and returns no content, so serving its result
+		// sent an empty playlist and rebuilt the file on every request.
+		if len(groupTitle) == 0 {
+			if _, err := os.Stat(m3uFilePath); err != nil {
+				log.Println("M3U file does not exist, building new one")
+				if _, err = buildM3U([]string{}); err != nil {
+					ShowError(err, 000)
+					httpStatusError(w, r, 500)
+					return
+				}
 			}
-		}
 
-		log.Println("M3U file does not exist, building new one")
+			http.ServeFile(w, r, m3uFilePath)
+			return
+		}
 
 		systemMutex.Lock()
 		if !System.Dev {
@@ -374,6 +406,27 @@ func DataImages(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// wsRefreshCommands are the web UI commands that refresh provider data or
+// rebuild the databases (see refreshMutex).
+var wsRefreshCommands = map[string]bool{
+	"saveSettings":     true,
+	"saveFilesM3U":     true,
+	"updateFileM3U":    true,
+	"saveFilesHDHR":    true,
+	"updateFileHDHR":   true,
+	"saveFilesXMLTV":   true,
+	"updateFileXMLTV":  true,
+	"saveFilter":       true,
+	"saveEpgMapping":   true,
+	"saveWizard":       true,
+	"ThreadfinRestore": true,
+}
+
+var (
+	wsMaxMessageSize int64 = 256 << 20
+	wsReadTimeout          = 5 * time.Minute
+)
+
 // WS : Web Sockets /ws/
 func WS(w http.ResponseWriter, r *http.Request) {
 
@@ -398,6 +451,19 @@ func WS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not open websocket connection", http.StatusBadRequest)
 		return
 	}
+
+	// The upgraded connection is no longer managed by the HTTP server: close
+	// it on every return, or the socket stays open until a GC finalizer
+	// happens to run (the web UI opens one per request, every 10 seconds).
+	defer conn.Close()
+
+	// A request is a single JSON message, read before the token is checked.
+	// Bound its size (the largest legitimate one is a backup uploaded for
+	// restore) and don't hold the socket for a client that never sends.
+	conn.SetReadLimit(wsMaxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+
+	var refreshLocked bool
 
 	systemMutex.Lock()
 	if Settings.HttpThreadfinDomain != "" {
@@ -455,6 +521,14 @@ func WS(w http.ResponseWriter, r *http.Request) {
 		}
 		systemMutex.Unlock()
 
+		// Commands that refresh provider data or rebuild the databases wait
+		// for a scheduled update (or another such command) to finish.
+		if wsRefreshCommands[request.Cmd] && !refreshLocked {
+			refreshMutex.Lock()
+			refreshLocked = true
+			defer refreshMutex.Unlock()
+		}
+
 		switch request.Cmd {
 		// Data read commands
 		case "getServerConfig":
@@ -485,16 +559,13 @@ func WS(w http.ResponseWriter, r *http.Request) {
 					response.Reload = true
 				}
 
-				// if Settings.StoreBufferInRAM != previousStoreBufferInRAM {
-				initBufferVFS()
-				// }
 			}
 
 		case "saveFilesM3U":
 			// Reset cache for urls.json
 			var filename = getPlatformFile(System.Folder.Config + "urls.json")
 			saveMapToJSONFile(filename, make(map[string]StreamInfo))
-			Data.Cache.StreamingURLS = make(map[string]StreamInfo)
+			resetStreamingURLs()
 
 			err = saveFiles(request, "m3u")
 			if err == nil {
@@ -506,7 +577,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			// Reset cache for urls.json
 			var filename = getPlatformFile(System.Folder.Config + "urls.json")
 			saveMapToJSONFile(filename, make(map[string]StreamInfo))
-			Data.Cache.StreamingURLS = make(map[string]StreamInfo)
+			resetStreamingURLs()
 
 			err = updateFile(request, "m3u")
 			if err == nil {
@@ -560,9 +631,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "resetLogs":
-			WebScreenLog.Log = make([]string, 0)
-			WebScreenLog.Errors = 0
-			WebScreenLog.Warnings = 0
+			resetWebLog()
 			response.OpenMenu = strconv.Itoa(indexOfString("log", System.WEB.Menu))
 
 		case "ThreadfinBackup":
@@ -573,9 +642,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "ThreadfinRestore":
-			WebScreenLog.Log = make([]string, 0)
-			WebScreenLog.Errors = 0
-			WebScreenLog.Warnings = 0
+			resetWebLog()
 
 			if len(request.Base64) > 0 {
 				newWebURL, err := ThreadfinRestoreFromWeb(request.Base64)
@@ -972,6 +1039,11 @@ func API(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	if strings.HasPrefix(request.Cmd, "update.") {
+		refreshMutex.Lock()
+		defer refreshMutex.Unlock()
+	}
+
 	switch request.Cmd {
 	case "login": // Muss nichts übergeben werden
 
@@ -1063,6 +1135,7 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 
 	// Total connections for all playlists
 	totalPlaylistCount := 0
+	providerMutex.RLock()
 	if len(Settings.Files.M3U) > 0 {
 		for _, value := range Settings.Files.M3U {
 
@@ -1085,6 +1158,7 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 			}
 		}
 	}
+	providerMutex.RUnlock()
 
 	// Folgende Daten immer an den Client übergeben
 	defaults.ClientInfo.ARCH = System.ARCH
@@ -1095,14 +1169,15 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 	defaults.ClientInfo.OS = System.OS
 	defaults.ClientInfo.Streams = fmt.Sprintf("%d / %d", len(Data.Streams.Active), len(Data.Streams.All))
 	defaults.ClientInfo.UUID = Settings.UUID
-	defaults.ClientInfo.Errors = WebScreenLog.Errors
-	defaults.ClientInfo.Warnings = WebScreenLog.Warnings
+	var webLog = webLogSnapshot()
+	defaults.ClientInfo.Errors = webLog.Errors
+	defaults.ClientInfo.Warnings = webLog.Warnings
 	defaults.ClientInfo.ActiveClients = getActiveClientCount()
 	defaults.ClientInfo.ActivePlaylist = getActivePlaylistCount()
 	defaults.ClientInfo.TotalClients = Settings.Tuner
 	defaults.ClientInfo.TotalPlaylist = totalPlaylistCount
 	defaults.Notification = System.Notification
-	defaults.Log = WebScreenLog
+	defaults.Log = webLog
 
 	switch System.Branch {
 
@@ -1155,67 +1230,47 @@ func setDefaultResponseData(response ResponseStruct, data bool) (defaults Respon
 }
 
 func enablePPV(w http.ResponseWriter, r *http.Request) {
-	xepg, err := loadJSONFileToMap(System.File.XEPG)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
-	}
-
-	for _, c := range xepg {
-
-		var xepgChannel = c.(map[string]interface{})
-
-		if xepgChannel["x-mapping"] == "PPV" {
-			xepgChannel["x-active"] = true
-		}
-	}
-
-	err = saveMapToJSONFile(System.File.XEPG, xepg)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
-		w.WriteHeader(405)
-		return
-	}
-	buildXEPG(false)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
+	setPPVChannelsActive(w, true)
 }
 
 func disablePPV(w http.ResponseWriter, r *http.Request) {
-	xepg, err := loadJSONFileToMap(System.File.XEPG)
-	if err != nil {
-		var response APIResponseStruct
+	setPPVChannelsActive(w, false)
+}
 
+// setPPVChannelsActive activates or deactivates every channel mapped to
+// the PPV dummy guide. If xepg.json can't be read it stops: saving the
+// empty result used to replace every channel mapping with "null".
+func setPPVChannelsActive(w http.ResponseWriter, active bool) {
+
+	refreshMutex.Lock()
+	defer refreshMutex.Unlock()
+
+	var fail = func(err error) {
+		var response APIResponseStruct
 		response.Status = false
 		response.Error = err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(mapToJSON(response)))
+	}
+
+	xepg, err := loadJSONFileToMap(System.File.XEPG)
+	if err != nil {
+		fail(err)
+		return
 	}
 
 	for _, c := range xepg {
-
-		var xepgChannel = c.(map[string]interface{})
-
-		if xepgChannel["x-mapping"] == "PPV" && xepgChannel["x-active"] == true {
-			xepgChannel["x-active"] = false
+		if xepgChannel, ok := c.(map[string]interface{}); ok && xepgChannel["x-mapping"] == "PPV" {
+			xepgChannel["x-active"] = active
 		}
 	}
 
-	err = saveMapToJSONFile(System.File.XEPG, xepg)
-	if err != nil {
-		var response APIResponseStruct
-
-		response.Status = false
-		response.Error = err.Error()
-		w.Write([]byte(mapToJSON(response)))
+	if err = saveMapToJSONFile(System.File.XEPG, xepg); err != nil {
+		fail(err)
+		return
 	}
+
 	buildXEPG(false)
 
 	w.Header().Set("Content-Type", "application/json")

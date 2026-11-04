@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"threadfin/src"
 )
@@ -114,6 +116,10 @@ func main() {
 			fmt.Println()
 			fmt.Println("* * * * * * * * * * * * * * * *")
 
+			// A non-zero exit code lets a supervisor (systemd, Docker
+			// restart policies) restart Threadfin.
+			os.Exit(1)
+
 		}
 
 	}()
@@ -135,7 +141,7 @@ func main() {
 		err := src.Init()
 		if err != nil {
 			src.ShowError(err, 0)
-			os.Exit(0)
+			os.Exit(1)
 		}
 
 		src.ShowSystemInfo()
@@ -178,12 +184,13 @@ func main() {
 		err := src.Init()
 		if err != nil {
 			src.ShowError(err, 0)
-			os.Exit(0)
+			os.Exit(1)
 		}
 
 		err = src.ThreadfinRestoreFromCLI(*restore)
 		if err != nil {
 			src.ShowError(err, 0)
+			os.Exit(1)
 		}
 
 		os.Exit(0)
@@ -192,7 +199,7 @@ func main() {
 	err := src.Init()
 	if err != nil {
 		src.ShowError(err, 0)
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	err = src.BinaryUpdate()
@@ -203,19 +210,30 @@ func main() {
 	err = src.StartSystem(false)
 	if err != nil {
 		src.ShowError(err, 0)
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	err = src.InitMaintenance()
 	if err != nil {
 		src.ShowError(err, 0)
-		os.Exit(0)
+		os.Exit(1)
 	}
+
+	// On Ctrl+C or a service stop (SIGTERM), stop the streams before
+	// exiting: their FFmpeg/VLC processes run in their own process groups
+	// and would otherwise keep running.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-quit
+		src.Shutdown()
+		os.Exit(0)
+	}()
 
 	err = src.StartWebserver()
 	if err != nil {
 		src.ShowError(err, 0)
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 }

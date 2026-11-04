@@ -261,35 +261,145 @@ func jsonToInterface(content string) (tmpMap interface{}, err error) {
 
 }
 
+// toFloat64 returns a number from a settings map as float64: decoded from
+// JSON it is a float64, set in code it may be an int.
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
 func saveMapToJSONFile(file string, tmpMap interface{}) error {
 
-	var filename = getPlatformFile(file)
 	jsonString, err := json.MarshalIndent(tmpMap, "", "  ")
-
 	if err != nil {
 		return err
 	}
 
-	os.Create(filename)
-	err = os.WriteFile(filename, []byte(jsonString), 0644)
+	return writeFileAtomic(getPlatformFile(file), jsonString, 0644)
+}
+
+// writeFileAtomic replaces filename with data so that readers (and a
+// restart after a crash or power loss) see either the old or the new
+// content, never a truncated file: the data goes to a temporary file in the
+// same folder, is flushed to disk and then renamed over the original.
+func writeFileAtomic(filename string, data []byte, perm os.FileMode) (err error) {
+
+	tmp, err := os.CreateTemp(filepath.Dir(filename), "."+filepath.Base(filename)+".tmp*")
 	if err != nil {
 		return err
+	}
+
+	defer func() {
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
+
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+
+	if err = tmp.Chmod(perm); err != nil {
+		return err
+	}
+
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+
+	if err = os.Rename(tmp.Name(), filename); err != nil {
+		// The target can't be replaced (e.g. a file bind-mounted into a
+		// container): fall back to writing it in place.
+		os.Remove(tmp.Name())
+		return os.WriteFile(filename, data, perm)
 	}
 
 	return nil
 }
 
+// atomicFile is written next to its target and renamed over it by Commit,
+// so a reader (a client fetching the playlist or guide while it is rebuilt)
+// sees either the old or the new file, never a partial one.
+type atomicFile struct {
+	*os.File
+	target    string
+	committed bool
+}
+
+// createAtomic starts replacing filename. Defer Discard: it removes the
+// temporary file unless Commit succeeded.
+func createAtomic(filename string) (*atomicFile, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(filename), "."+filepath.Base(filename)+".tmp*")
+	if err != nil {
+		return nil, err
+	}
+	return &atomicFile{File: tmp, target: filename}, nil
+}
+
+// Commit closes the file and puts it in place of the target.
+func (f *atomicFile) Commit() (err error) {
+	if err = f.File.Chmod(0644); err != nil {
+		return err
+	}
+	if err = f.File.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), f.target); err != nil {
+		// The target can't be replaced (e.g. bind-mounted): copy instead.
+		if err = copyFileContents(f.Name(), f.target); err != nil {
+			return err
+		}
+		os.Remove(f.Name())
+	}
+	f.committed = true
+	return nil
+}
+
+// Discard removes the temporary file if it wasn't committed.
+func (f *atomicFile) Discard() {
+	if !f.committed {
+		f.File.Close()
+		os.Remove(f.Name())
+	}
+}
+
+func copyFileContents(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func loadJSONFileToMap(file string) (tmpMap map[string]interface{}, err error) {
-	f, err := os.Open(getPlatformFile(file))
-	defer f.Close()
 
-	content, err := io.ReadAll(f)
-
-	if err == nil {
-		err = json.Unmarshal([]byte(content), &tmpMap)
+	content, err := os.ReadFile(getPlatformFile(file))
+	if err != nil {
+		return
 	}
 
-	f.Close()
+	err = json.Unmarshal(content, &tmpMap)
 
 	return
 }
@@ -297,21 +407,12 @@ func loadJSONFileToMap(file string) (tmpMap map[string]interface{}, err error) {
 // Binary
 func readByteFromFile(file string) (content []byte, err error) {
 
-	f, err := os.Open(getPlatformFile(file))
-	defer f.Close()
-
-	content, err = io.ReadAll(f)
-	f.Close()
-
-	return
+	return os.ReadFile(getPlatformFile(file))
 }
 
 func writeByteToFile(file string, data []byte) (err error) {
 
-	var filename = getPlatformFile(file)
-	err = os.WriteFile(filename, data, 0644)
-
-	return
+	return writeFileAtomic(getPlatformFile(file), data, 0644)
 }
 
 func readStringFromFile(file string) (str string, err error) {

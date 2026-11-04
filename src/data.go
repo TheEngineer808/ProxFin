@@ -292,20 +292,24 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			// Neue Providerdatei
 			dataID = indicator + randomString(19)
 			data.(map[string]interface{})["new"] = true
-			filesMap[dataID] = data
+			withProviders(func() { filesMap[dataID] = data })
 
 		} else {
 
 			// Bereits vorhandene Providerdatei
+			providerMutex.Lock()
 			for key, value := range data.(map[string]interface{}) {
 
-				var oldData = filesMap[dataID].(map[string]interface{})
-				oldData[key] = value
+				if oldData, ok := filesMap[dataID].(map[string]interface{}); ok {
+					oldData[key] = value
+				}
 
 			}
+			providerMutex.Unlock()
 
 		}
 
+		providerMutex.Lock()
 		switch fileType {
 
 		case "m3u":
@@ -318,16 +322,21 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			Settings.Files.XMLTV = filesMap
 
 		}
+		providerMutex.Unlock()
 
 		// Neue Providerdatei
 		if _, ok := data.(map[string]interface{})["new"]; ok {
 
 			reloadData = true
 			err = getProviderData(fileType, dataID)
-			delete(data.(map[string]interface{}), "new")
+			withProviders(func() {
+				delete(data.(map[string]interface{}), "new")
+				if err != nil {
+					delete(filesMap, dataID)
+				}
+			})
 
 			if err != nil {
-				delete(filesMap, dataID)
 				return
 			}
 
@@ -414,8 +423,14 @@ func deleteLocalProviderFiles(dataID, fileType string) {
 		fileExtension = ".xml"
 	}
 
-	if _, ok := removeData[dataID]; ok {
+	providerMutex.Lock()
+	_, ok := removeData[dataID]
+	if ok {
 		delete(removeData, dataID)
+	}
+	providerMutex.Unlock()
+
+	if ok {
 		os.RemoveAll(System.Folder.Data + dataID + fileExtension)
 	}
 
@@ -509,7 +524,7 @@ func saveXEpgMapping(request RequestStruct) (err error) {
 
 	var tmp = Data.XEPG
 
-	Data.Cache.StreamingURLS = make(map[string]StreamInfo)
+	resetStreamingURLs()
 
 	Data.Cache.Images, err = imgcache.New(System.Folder.ImagesCache, fmt.Sprintf("%s://%s/images/", System.ServerProtocol.WEB, System.Domain), Settings.CacheImages)
 	if err != nil {
@@ -814,14 +829,23 @@ func buildDatabaseDVR() (err error) {
 
 	err = createFilterRules()
 	if err != nil {
+		// Clear the flag, or the scheduled updates and XEPG builds, which
+		// skip while a scan is in progress, would stay off until a restart.
+		System.ScanInProgress = 0
 		return
 	}
+
+	var filters = prepareFilters(Data.Filter)
 
 	for _, fileType := range availableFileTypes {
 
 		var playlistFile = getLocalProviderFiles(fileType)
 
-		for n, i := range playlistFile {
+		// A playlist that fails to load is reported and contributes no
+		// streams. It used to be removed from playlistFile while ranging
+		// over it, which skipped the next playlist (whose channels the XEPG
+		// cleanup then deleted) and loaded the last one twice.
+		for _, i := range playlistFile {
 
 			var channels []interface{}
 			var groupTitle, tvgID, uuid int = 0, 0, 0
@@ -844,7 +868,6 @@ func buildDatabaseDVR() (err error) {
 				ShowError(err, 1005)
 				err = errors.New(playlistName + ": Local copy of the file no longer exists")
 				ShowError(err, 0)
-				playlistFile = append(playlistFile[:n], playlistFile[n+1:]...)
 			}
 
 			// Streams analysieren
@@ -900,7 +923,7 @@ func buildDatabaseDVR() (err error) {
 					status = true
 				} else {
 					var liveEvent bool
-					status, liveEvent = filterThisStream(stream)
+					status, liveEvent = matchStream(s, filters)
 					s["liveEvent"] = strconv.FormatBool(liveEvent)
 				}
 
@@ -1025,6 +1048,9 @@ func getLocalProviderFiles(fileType string) (localFiles []string) {
 // Providerparameter anhand von dem Key ausgeben
 func getProviderParameter(id, fileType, key string) (s string) {
 
+	providerMutex.RLock()
+	defer providerMutex.RUnlock()
+
 	var dataMap = make(map[string]interface{})
 
 	switch fileType {
@@ -1056,6 +1082,8 @@ func getProviderParameter(id, fileType, key string) (s string) {
 // Provider Statistiken Kompatibilität aktualisieren
 func setProviderCompatibility(id, fileType string, compatibility map[string]int) {
 
+	providerMutex.Lock()
+
 	var dataMap = make(map[string]interface{})
 
 	switch fileType {
@@ -1069,7 +1097,8 @@ func setProviderCompatibility(id, fileType string, compatibility map[string]int)
 		dataMap = Settings.Files.XMLTV
 	}
 
-	if data, ok := dataMap[id].(map[string]interface{}); ok {
+	data, ok := dataMap[id].(map[string]interface{})
+	if ok {
 
 		data["compatibility"] = compatibility
 
@@ -1082,8 +1111,13 @@ func setProviderCompatibility(id, fileType string, compatibility map[string]int)
 			Settings.Files.XMLTV = dataMap
 		}
 
-		saveSettings(Settings)
+	}
 
+	// saveSettings takes providerMutex itself.
+	providerMutex.Unlock()
+
+	if ok {
+		saveSettings(Settings)
 	}
 
 }

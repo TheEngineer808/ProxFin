@@ -1,8 +1,10 @@
 package src
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +24,8 @@ func getProviderData(fileType, fileID string) (err error) {
 	var saveDateFromProvider = func(fileSource, serverFileName, id string, body []byte) (err error) {
 
 		var data = make(map[string]interface{})
+
+		providerMutex.Lock()
 
 		if value, ok := dataMap[id].(map[string]interface{}); ok {
 			data = value
@@ -91,6 +95,8 @@ func getProviderData(fileType, fileID string) (err error) {
 			data["id.provider"] = id
 		}
 
+		providerMutex.Unlock()
+
 		// Datei extrahieren
 		body, err = extractGZIP(body, fileSource)
 		if err != nil {
@@ -147,8 +153,11 @@ func getProviderData(fileType, fileID string) (err error) {
 		err = writeByteToFile(filePath, body)
 
 		if err == nil {
-			data["last.update"] = time.Now().Format("2006-01-02 15:04:05")
-			data["counter.download"] = data["counter.download"].(float64) + 1
+			withProviders(func() {
+				downloads, _ := toFloat64(data["counter.download"])
+				data["last.update"] = time.Now().Format("2006-01-02 15:04:05")
+				data["counter.download"] = downloads + 1
+			})
 		}
 
 		return
@@ -192,7 +201,7 @@ func getProviderData(fileType, fileID string) (err error) {
 
 		if _, ok := data["new"]; ok {
 			newProvider = true
-			delete(data, "new")
+			withProviders(func() { delete(data, "new") })
 		}
 
 		// Wenn eine ID vorhanden ist und nicht mit der aus der Datanbank übereinstimmt, wird die Aktualisierung übersprungen (goto)
@@ -268,8 +277,12 @@ func getProviderData(fileType, fileID string) (err error) {
 				if value, ok := dataMap[dataID].(map[string]interface{}); ok {
 
 					data = value
-					data["counter.error"] = data["counter.error"].(float64) + 1
-					data["counter.download"] = data["counter.download"].(float64) + 1
+					withProviders(func() {
+						errors, _ := toFloat64(data["counter.error"])
+						downloads, _ := toFloat64(data["counter.download"])
+						data["counter.error"] = errors + 1
+						data["counter.download"] = downloads + 1
+					})
 
 				}
 
@@ -284,19 +297,23 @@ func getProviderData(fileType, fileID string) (err error) {
 
 			if value, ok := dataMap[dataID].(map[string]interface{}); ok {
 
-				var data = make(map[string]interface{})
-				data = value
+				var data = value
 
-				if data["counter.error"].(float64) == 0 {
-					data["provider.availability"] = 100
-				} else {
-					data["provider.availability"] = int(data["counter.error"].(float64)*100/data["counter.download"].(float64)*-1 + 100)
-				}
+				withProviders(func() {
+					errors, _ := toFloat64(data["counter.error"])
+					downloads, _ := toFloat64(data["counter.download"])
+					if errors == 0 || downloads == 0 {
+						data["provider.availability"] = 100
+					} else {
+						data["provider.availability"] = int(errors*100/downloads*-1 + 100)
+					}
+				})
 
 			}
 
 		}
 
+		providerMutex.Lock()
 		switch fileType {
 
 		case "m3u":
@@ -310,6 +327,7 @@ func getProviderData(fileType, fileID string) (err error) {
 			delete(Data.Cache.XMLTV, System.Folder.Data+dataID+fileExtension)
 
 		}
+		providerMutex.Unlock()
 
 		saveSettings(Settings)
 
@@ -319,35 +337,46 @@ func getProviderData(fileType, fileID string) (err error) {
 	return
 }
 
+// Timeouts for playlist and EPG downloads. They detect a server that does
+// not answer or stops sending, without limiting how long a large file on a
+// slow connection may take. (This used to reuse the "Timeout for new client
+// connections" setting, read as seconds instead of milliseconds: 500 s by
+// default.)
+var (
+	downloadConnectTimeout  = 30 * time.Second
+	downloadResponseTimeout = 60 * time.Second
+	downloadIdleTimeout     = 60 * time.Second
+)
+
 func downloadFileFromServer(providerURL string, proxyUrl string) (filename string, body []byte, err error) {
 	_, err = url.ParseRequestURI(providerURL)
 	if err != nil {
 		return
 	}
 
-	// Derive a timeout: prefer configured buffer timeout if provided, else default to 30s
-	requestTimeout := 30 * time.Second
-	if Settings.BufferTimeout > 0 {
-		requestTimeout = time.Duration(Settings.BufferTimeout*1000) * time.Millisecond
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: downloadConnectTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   downloadConnectTimeout,
+		ResponseHeaderTimeout: downloadResponseTimeout,
+		ForceAttemptHTTP2:     true,
 	}
-
-	httpClient := &http.Client{Timeout: requestTimeout}
+	defer transport.CloseIdleConnections()
 
 	if proxyUrl != "" {
 		proxyURL, err := url.Parse(proxyUrl)
 		if err != nil {
 			return "", nil, err
 		}
-
-		httpClient = &http.Client{
-			Timeout: requestTimeout,
-			Transport: &http.Transport{
-				Proxy: http.ProxyURL(proxyURL),
-			},
-		}
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	req, err := http.NewRequest("GET", providerURL, nil)
+	httpClient := &http.Client{Transport: transport}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", providerURL, nil)
 	if err != nil {
 		return
 	}
@@ -382,10 +411,32 @@ func downloadFileFromServer(providerURL string, proxyUrl string) (filename strin
 		filename = cleanFilename[0]
 	}
 
-	body, err = io.ReadAll(resp.Body)
+	// Abort if the server stops sending data.
+	idle := time.AfterFunc(downloadIdleTimeout, cancel)
+	defer idle.Stop()
+
+	body, err = io.ReadAll(&idleReader{r: resp.Body, timer: idle, timeout: downloadIdleTimeout})
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%s: no data received for %v", providerURL, downloadIdleTimeout)
+		}
 		return
 	}
 
 	return
+}
+
+// idleReader restarts timer whenever data arrives.
+type idleReader struct {
+	r       io.Reader
+	timer   *time.Timer
+	timeout time.Duration
+}
+
+func (ir *idleReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.timer.Reset(ir.timeout)
+	}
+	return n, err
 }

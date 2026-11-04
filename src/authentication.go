@@ -84,6 +84,9 @@ func basicAuth(r *http.Request, level string) (username string, err error) {
 
 	payload, _ := base64.StdEncoding.DecodeString(auth[1])
 	pair := strings.SplitN(string(payload), ":", 2)
+	if len(pair) != 2 {
+		return
+	}
 
 	username = pair[0]
 	var password = pair[1]

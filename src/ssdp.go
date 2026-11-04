@@ -1,72 +1,120 @@
 package src
 
 import (
-  "fmt"
-  "log"
-  "os"
-  "os/signal"
-  "time"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"time"
 
-  "github.com/koron/go-ssdp"
+	"github.com/koron/go-ssdp"
+)
+
+var (
+	ssdpMutex sync.Mutex
+	ssdpStop  chan struct{} // closed to end the running advertiser
+	ssdpDone  chan struct{} // closed once it has said goodbye
 )
 
 // SSDP : SSPD / DLNA Server
 func SSDP() (err error) {
 
-  if Settings.SSDP == false || System.Flag.Info == true {
-    return
-  }
+	if Settings.SSDP == false || System.Flag.Info == true {
+		return
+	}
 
-  showInfo(fmt.Sprintf("SSDP / DLNA:%t", Settings.SSDP))
+	// Init runs again after a restore: replace the running advertiser
+	// instead of starting a second one that keeps announcing the old
+	// device.
+	stopSSDP()
 
-  quit := make(chan os.Signal, 1)
-  signal.Notify(quit, os.Interrupt)
+	showInfo(fmt.Sprintf("SSDP / DLNA:%t", Settings.SSDP))
 
-  ad, err := ssdp.Advertise(
-    fmt.Sprintf("upnp:rootdevice"),                           // send as "ST"
-    fmt.Sprintf("uuid:%s::upnp:rootdevice", System.DeviceID), // send as "USN"
-    fmt.Sprintf("%s/device.xml", System.URLBase),             // send as "LOCATION"
-    System.AppName, // send as "SERVER"
-    1800)           // send as "maxAge" in "CACHE-CONTROL"
+	ad, err := ssdp.Advertise(
+		fmt.Sprintf("upnp:rootdevice"),                           // send as "ST"
+		fmt.Sprintf("uuid:%s::upnp:rootdevice", System.DeviceID), // send as "USN"
+		fmt.Sprintf("%s/device.xml", System.URLBase),             // send as "LOCATION"
+		System.AppName, // send as "SERVER"
+		1800)           // send as "maxAge" in "CACHE-CONTROL"
 
-  if err != nil {
-    return
-  }
+	if err != nil {
+		return
+	}
 
-  // Debug SSDP
-  if System.Flag.Debug == 3 {
-    ssdp.Logger = log.New(os.Stderr, "[SSDP] ", log.LstdFlags)
-  }
+	// Debug SSDP
+	if System.Flag.Debug == 3 {
+		ssdp.Logger = log.New(os.Stderr, "[SSDP] ", log.LstdFlags)
+	}
 
-  go func(adv *ssdp.Advertiser) {
+	stop, done := make(chan struct{}), make(chan struct{})
+	ssdpMutex.Lock()
+	ssdpStop, ssdpDone = stop, done
+	ssdpMutex.Unlock()
 
-    aliveTick := time.Tick(300 * time.Second)
+	go func(adv *ssdp.Advertiser) {
 
-  loop:
-    for {
+		defer close(done)
 
-      select {
+		aliveTick := time.NewTicker(300 * time.Second)
+		defer aliveTick.Stop()
 
-      case <-aliveTick:
-        err = adv.Alive()
-        if err != nil {
-          ShowError(err, 0)
-          adv.Bye()
-          adv.Close()
-          break loop
-        }
+		for {
 
-      case <-quit:
-        adv.Bye()
-        adv.Close()
-        os.Exit(0)
-        break loop
+			select {
 
-      }
+			case <-aliveTick.C:
+				if err := adv.Alive(); err != nil {
+					ShowError(err, 0)
+					adv.Bye()
+					adv.Close()
+					return
+				}
 
-    }
+			case <-stop:
+				adv.Bye()
+				adv.Close()
+				return
 
-  }(ad)
+			}
 
-  return
+		}
+
+	}(ad)
+
+	return
+}
+
+// stopSSDP ends the SSDP announcement (saying goodbye, so DVR clients drop
+// the tuner at once) and waits for it. Shutdown is handled by main, which
+// stops the streams first.
+func stopSSDP() {
+
+	ssdpMutex.Lock()
+	stop, done := ssdpStop, ssdpDone
+	ssdpStop, ssdpDone = nil, nil
+	ssdpMutex.Unlock()
+
+	if stop == nil {
+		return
+	}
+
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// Shutdown stops what must not outlive Threadfin: the stream processes
+// (FFmpeg/VLC run in their own process groups, so they would keep running
+// and holding the providers' connections) and the SSDP announcement.
+func Shutdown() {
+
+	showInfo("Threadfin:Shutting down")
+
+	if err := streamManager.Shutdown(5 * time.Second); err != nil {
+		ShowError(err, 0)
+	}
+
+	stopSSDP()
 }
