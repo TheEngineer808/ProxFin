@@ -7,7 +7,7 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-orange)
 ![Go 1.22+](https://img.shields.io/badge/go-1.22%2B-00ADD8)
-![Tests](https://img.shields.io/badge/tests-108%20passing%20(race%20detector)-3ecf8e)
+![Tests](https://img.shields.io/badge/tests-113%20passing%20(race%20detector)-3ecf8e)
 
 </div>
 
@@ -50,7 +50,7 @@ Threadfin presents your IPTV playlists and XMLTV guides to Plex, Emby and Jellyf
 | Playlists larger than 10 MB | Loaded as **0 channels**, and their mappings were deleted | Parsed correctly |
 | First import of 2,000 channels | 52 s | 0.1 s |
 | 200 open web UI requests | 92 sockets left open on the server | 0 |
-| Automated tests | 1 | **108** plus 11 benchmarks, all run with Go's race detector |
+| Automated tests | 1 | **113** plus 11 benchmarks, all run with Go's race detector |
 
 ---
 
@@ -206,6 +206,11 @@ Go cannot recover from a concurrent map write, so each of these killed Threadfin
 
 ### Security hardening
 
+- **Other websites can no longer control Threadfin.** The web interface's websocket accepted connections from any origin. With web authentication off (the default), any page opened by someone on your network could make their browser change Threadfin's settings, including the FFmpeg path and options, which means running commands on the server.
+  - Requests that change something (the websocket, the API, the PPV endpoints, logins) are now refused when a browser sends them for another website. This uses the browser's `Sec-Fetch-Site` header, or the `Origin` header on older browsers.
+  - It works behind reverse proxies, through `X-Forwarded-Host` or the configured Threadfin domain.
+  - Plex, Emby, Jellyfin, curl and scripts are not affected.
+- **Password hashes and salts are no longer sent to the web interface.**
 - **Backup restore rejects archive entries that escape the target folder** (zip slip).
 - **Uploaded logo file names can no longer write outside the upload folder** (path traversal).
 - **A malformed Basic-auth header** no longer panics the request handler.
@@ -272,9 +277,9 @@ Everything from Threadfin and xTeVe is still here.
 ## Installation
 
 > [!IMPORTANT]
-> **Turn off *Automatic update of Threadfin*** (Settings → General) when running this build. The updater downloads releases from the repository set in [`threadfin.go`](threadfin.go) (`GitHub`), which still points at upstream Threadfin. A newer upstream release would replace this build.
->
 > The `fyb3roptik/threadfin` image on Docker Hub is upstream Threadfin and does **not** include these changes. Build the image from this repository.
+>
+> Automatic updates are switched off in this build, so it never replaces itself with an upstream Threadfin release. The *Automatic update* setting has no effect until updates are configured (see [Forks](#forks)).
 
 ### Docker
 
@@ -398,7 +403,9 @@ The `vendor/` folder is out of date, which is why `-mod=mod` is needed.
 
 ### Forks
 
-To publish a fork, point the `GitHub` variable in [`threadfin.go`](threadfin.go) at your repository, or set `Update: false`. Otherwise installs of your fork update themselves to upstream releases.
+Automatic updates download releases from the repository named by the `GitHub` variable in [`threadfin.go`](threadfin.go). In this build it is still upstream Threadfin, so updates are switched off (`Update: false`).
+
+To turn them on, point `User` and `Repo` at a repository that publishes releases, then set `Update: true`. A test (`threadfin_test.go`) fails if updates are switched on while the variable still points at upstream.
 
 ---
 
@@ -406,10 +413,7 @@ To publish a fork, point the `GitHub` variable in [`threadfin.go`](threadfin.go)
 
 These were found in the review and are not fixed yet:
 
-- **Keep the web interface on a trusted network.**
-  - The web interface's websocket accepts connections from any origin, so with web authentication off (the default), a web page opened by someone on your network could change Threadfin's settings.
-  - Enable *Web Authentication*, and don't expose port 34400 to the internet.
-  - With authentication off, the stored password hashes are also sent to the web interface.
+- **Don't expose port 34400 to the internet,** and enable *Web Authentication* if others can reach it. Cross-site requests are refused, but with authentication off anyone who can open the web interface can change settings.
 - **Memory:** the parsed guide is kept in memory, at about 2.4× the size of the XMLTV files. A streaming guide writer is planned.
 - **Updating one playlist from the web interface refreshes every playlist and guide.**
 - **No global memory limit for stream buffers:** each channel holds up to 48 MB or 15 s.

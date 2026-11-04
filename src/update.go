@@ -20,7 +20,9 @@ import (
 func BinaryUpdate() (err error) {
 
 	if !System.GitHub.Update {
-		showWarning(2099)
+		// Not a problem to warn about on every start: this build has no
+		// release source configured (see GitHub in threadfin.go).
+		showInfo("Update:Automatic updates are disabled in this build")
 		return
 	}
 
