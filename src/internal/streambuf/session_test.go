@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -305,6 +307,110 @@ func TestEveryBackupIsTriedThenViewersAreReleased(t *testing.T) {
 	}
 }
 
+// plannedLauncher starts the i-th planned behaviour on the i-th launch
+// (the last one repeats): one source whose upstream changes over time.
+type plannedLauncher struct {
+	mu       sync.Mutex
+	plan     []behaviour
+	launches int
+}
+
+func (l *plannedLauncher) launch(Source) (Process, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.plan[len(l.plan)-1]
+	if l.launches < len(l.plan) {
+		b = l.plan[l.launches]
+	}
+	l.launches++
+	return startFake(b), nil
+}
+
+func (l *plannedLauncher) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.launches
+}
+
+var refused = behaviour{failNow: true, exitErr: errors.New("connection refused")}
+
+// A channel without backups that was streaming survives its upstream
+// being unreachable for a moment (it used to release its viewers after
+// the second failed attempt, about 0.5 s into the outage).
+func TestLoneSourceSurvivesShortOutage(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{
+		{runFor: 2 * cfg.HealthyAfter}, // streams healthily, then the upstream goes away
+		refused, refused, refused,      // still away
+		{}, // back
+	}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	if _, err := readFor(t, v, 3*cfg.HealthyAfter); err != nil {
+		t.Fatalf("viewer released during a short outage: %v (after %d launches)", err, l.count())
+	}
+	if n := l.count(); n != 5 {
+		t.Fatalf("%d launches, want the source back on the 5th", n)
+	}
+	if data, err := readFor(t, v, 200*time.Millisecond); err != nil || len(data) == 0 {
+		t.Fatalf("no data after the upstream came back (%d bytes, %v)", len(data), err)
+	}
+}
+
+// ... but not forever: if the upstream stays away, its viewers are
+// released after a bounded number of attempts.
+func TestLoneSourceOutageIsBounded(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{{runFor: 2 * cfg.HealthyAfter}, refused}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		if _, err := v.Next(ctx); err != nil {
+			if !errors.Is(err, ErrStreamFailed) {
+				t.Fatalf("Next = %v, want ErrStreamFailed", err)
+			}
+			break
+		}
+	}
+	if n, want := l.count(), 1+2+cfg.LoneSourceRetries; n != want {
+		t.Fatalf("%d launches, want %d", n, want)
+	}
+}
+
+// A channel that never started is not retried longer: the client gets
+// its error (a 503) at once.
+func TestLoneSourceThatNeverStartedFailsFast(t *testing.T) {
+	cfg := testConfig()
+	l := &plannedLauncher{plan: []behaviour{refused}}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")}, Launch: l.launch, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := v.WaitReady(ctx); !errors.Is(err, ErrStreamFailed) {
+		t.Fatalf("WaitReady = %v, want ErrStreamFailed", err)
+	}
+	if n := l.count(); n != 2 {
+		t.Fatalf("%d launches, want 2", n)
+	}
+}
+
 func TestStalledSourceIsReplaced(t *testing.T) {
 	l := newFakeLauncher(map[string]behaviour{
 		"primary": {runFor: 100 * time.Millisecond, hang: true},
@@ -427,6 +533,95 @@ func TestTunerWaitCoversChannelSwitchOverlap(t *testing.T) {
 	defer busy.Close()
 	if _, err := m.Join(context.Background(), request(l, cfg, b)); !errors.Is(err, ErrNoTuner) {
 		t.Fatalf("Join = %v, want ErrNoTuner while the tuner stays busy", err)
+	}
+}
+
+// With the default linger, the old channel keeps its tuner after its last
+// viewer leaves. A new channel waiting for that tuner must get it as soon
+// as the old channel is closed, not when its own TunerWait runs out (it
+// used to wait the full TunerWait on every such channel switch).
+func TestChannelSwitchOverlapDoesNotWaitOutTunerWait(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Linger = 5 * time.Second
+	cfg.TunerWait = 2 * time.Second
+	a, b := src("P", "a"), src("P", "b")
+	a.TunerLimit, b.TunerLimit = 1, 1
+
+	old, err := m.Join(context.Background(), request(l, cfg, a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		old.Close()
+	}()
+
+	start := time.Now()
+	v, err := m.Join(context.Background(), request(l, cfg, b))
+	if err != nil {
+		t.Fatalf("new channel refused: %v", err)
+	}
+	defer v.Close()
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("new channel waited %v for the tuner the old one left 50ms in", d)
+	}
+	if st := m.Stats(); st.Streams != 1 {
+		t.Fatalf("%d streams running, want only the new channel", st.Streams)
+	}
+}
+
+// A log write that blocks (a stalled stdout) must not hold the manager's
+// lock: tunes and the web interface's counts go on.
+func TestBlockedLoggerDoesNotStallTheManager(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}})
+	block := make(chan struct{})
+	var blocking atomic.Bool
+	m := NewManager(Logger{Info: func(string) {
+		if blocking.Load() {
+			<-block
+		}
+	}})
+	cfg := testConfig()
+	a, b := src("P", "a"), src("P", "b")
+	a.TunerLimit, b.TunerLimit = 1, 1
+
+	v, err := m.Join(context.Background(), request(l, cfg, a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking.Store(true)
+	go v.Close() // logs the new client count, and blocks there
+
+	// Takes the lingering tuner, then blocks in its own log write.
+	joined := make(chan *Viewer, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cfg := cfg
+		cfg.TunerWait = time.Second
+		v, _ := m.Join(context.Background(), request(l, cfg, b))
+		joined <- v
+	}()
+
+	stats := make(chan Stats, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		stats <- m.Stats()
+	}()
+	select {
+	case st := <-stats:
+		if st.Streams != 1 || st.Viewers != 1 {
+			t.Errorf("stats %+v, want the new channel running with one viewer", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("the manager is stuck while a log write blocks")
+	}
+
+	blocking.Store(false)
+	close(block)
+	if v := <-joined; v != nil {
+		v.Close()
 	}
 }
 
@@ -591,4 +786,139 @@ func TestPooledChunksAreNeverReusedEarly(t *testing.T) {
 		}(int64(i))
 	}
 	wg.Wait()
+}
+
+func TestShutdownStopsEverything(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {}, "b": {}, "c": {}, "busy": {}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Linger = time.Hour
+
+	var viewers []*Viewer
+	for _, url := range []string{"a", "b", "c"} {
+		s := src("P", url)
+		s.TunerLimit = 3
+		v, err := m.Join(context.Background(), request(l, cfg, s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := v.WaitReady(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		viewers = append(viewers, v)
+	}
+	viewers[2].Close() // channel c lingers
+
+	// A channel on another playlist waits for a tuner.
+	busy, other := src("Q", "busy"), src("Q", "c")
+	busy.TunerLimit, other.TunerLimit = 1, 1
+	bv, _ := m.Join(context.Background(), request(l, cfg, busy))
+	defer bv.Close()
+	waiting := make(chan error, 1)
+	go func() {
+		cfg := cfg
+		cfg.TunerWait = time.Minute
+		_, err := m.Join(context.Background(), request(l, cfg, other))
+		waiting <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	if err := m.Shutdown(2 * time.Second); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	t.Logf("shutdown took %v", time.Since(start))
+
+	// Shutdown returns once every process was waited for; the fake
+	// launcher's own count follows a moment later.
+	for deadline := time.Now().Add(time.Second); l.running.Load() > 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := l.running.Load(); n != 0 {
+		t.Errorf("%d processes still running after Shutdown", n)
+	}
+	if st := m.Stats(); st != (Stats{}) {
+		t.Errorf("stats after Shutdown: %+v", st)
+	}
+	select {
+	case err := <-waiting:
+		if !errors.Is(err, ErrShutdown) {
+			t.Errorf("waiting Join = %v, want ErrShutdown", err)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("a Join waiting for a tuner was not released by Shutdown")
+	}
+	for _, v := range viewers[:2] {
+		if _, err := readFor(t, v, time.Second); !errors.Is(err, ErrStopped) {
+			t.Errorf("viewer got %v, want ErrStopped", err)
+		}
+		v.Close()
+	}
+	if _, err := m.Join(context.Background(), request(l, cfg, src("P", "a"))); !errors.Is(err, ErrShutdown) {
+		t.Errorf("Join after Shutdown = %v, want ErrShutdown", err)
+	}
+	if err := m.Shutdown(time.Second); err != nil { // a second call is harmless
+		t.Errorf("second Shutdown: %v", err)
+	}
+}
+
+// stuckProc ignores Stop: its output ends only when the test releases it.
+type stuckProc struct{ release chan struct{} }
+
+func (p stuckProc) Read([]byte) (int, error) { <-p.release; return 0, io.EOF }
+func (p stuckProc) Stop()                    {}
+func (p stuckProc) Wait() error              { return nil }
+
+func TestShutdownTimesOutOnAProcessThatDoesNotExit(t *testing.T) {
+	p := stuckProc{release: make(chan struct{})}
+	m := NewManager(Logger{})
+	v, err := m.Join(context.Background(), Request{Channel: "c", Sources: []Source{src("P", "a")},
+		Launch: func(Source) (Process, error) { return p, nil }, Config: testConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	time.Sleep(20 * time.Millisecond) // the process is started
+
+	if err := m.Shutdown(100 * time.Millisecond); !errors.Is(err, ErrShutdownTimeout) {
+		t.Errorf("Shutdown = %v, want ErrShutdownTimeout", err)
+	}
+	close(p.release)
+	if err := m.Shutdown(time.Second); err != nil {
+		t.Errorf("Shutdown once the process ended: %v", err)
+	}
+}
+
+// At the live position, a viewer's data is sent in batches of whatever
+// arrived within CoalesceDelay (or CoalesceBytes of it, whichever comes
+// first), so it can be written with few system calls.
+func TestLiveViewerGetsCoalescedBatches(t *testing.T) {
+	l := newFakeLauncher(map[string]behaviour{"a": {rate: 10 * time.Millisecond}})
+	m := NewManager(Logger{})
+	cfg := testConfig()
+	cfg.Prebuffer = 0
+	cfg.CoalesceDelay = 100 * time.Millisecond
+	v, err := m.Join(context.Background(), request(l, cfg, src("P", "a")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	readFor(t, v, 300*time.Millisecond) // the start-up burst
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	batches, pieces := 0, 0
+	for {
+		bufs, err := v.Next(ctx)
+		if err != nil {
+			break
+		}
+		batches++
+		pieces += len(bufs)
+	}
+	// A frame every 10 ms: about 10 per batch, 10 batches a second.
+	t.Logf("%d batches, %.1f frames per batch", batches, float64(pieces)/float64(batches))
+	if batches > 14 || float64(pieces)/float64(batches) < 6 {
+		t.Fatalf("%d batches of %.1f frames in 1 s, want about 10 of 10", batches, float64(pieces)/float64(batches))
+	}
 }

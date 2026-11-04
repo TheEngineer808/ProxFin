@@ -3,6 +3,8 @@ package src
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"threadfin/src/internal/streambuf"
 )
 
 // These tests drive the whole buffer (HTTP handler, stream manager, real
@@ -44,7 +48,7 @@ var (
 
 // setupBufferTest configures the globals once for all buffer tests. Every
 // test uses its own stream URLs.
-func setupBufferTest(t *testing.T) {
+func setupBufferTest(t testing.TB) {
 	t.Helper()
 
 	if testing.Short() {
@@ -423,5 +427,201 @@ func TestBufferRealFFmpegJoinerStartsCleanly(t *testing.T) {
 	}
 	if joiner.bytes < int64(Settings.BufferSize*1024) {
 		t.Errorf("joiner received %d bytes in 3 s, want at least the %d KB cushion", joiner.bytes, Settings.BufferSize)
+	}
+}
+
+// ---- HEAD ---------------------------------------------------------------
+
+// A provider that never answers a HEAD request (common: many do not
+// support it) must not hold the client's request, a goroutine and a socket
+// forever; nor may a client that left.
+func TestStreamHEADIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ok") {
+			w.Header().Set("X-Provider", "yes")
+			return
+		}
+		select { // never answers
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer provider.Close()
+	defer close(release)
+
+	old := streamHeadTimeout
+	defer func() { streamHeadTimeout = old }()
+
+	head := func(ctx context.Context, path string) (*httptest.ResponseRecorder, time.Duration) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, "/stream/x", nil).WithContext(ctx)
+		start := time.Now()
+		streamHEAD(rec, req, provider.URL+path)
+		return rec, time.Since(start)
+	}
+
+	streamHeadTimeout = 300 * time.Millisecond
+	if rec, d := head(context.Background(), "/silent"); d > 2*time.Second || rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("silent provider: answered %d after %v, want 405 after the timeout", rec.Code, d)
+	}
+
+	streamHeadTimeout = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // the client leaves
+	defer cancel()
+	if _, d := head(ctx, "/silent"); d > 2*time.Second {
+		t.Errorf("request went on for %v after the client left", d)
+	}
+
+	if rec, _ := head(context.Background(), "/ok"); rec.Code != http.StatusOK || rec.Header().Get("X-Provider") != "yes" {
+		t.Errorf("provider headers not passed on: %d %v", rec.Code, rec.Header())
+	}
+}
+
+// stuckWriter is a client that accepts no data: a write blocks until the
+// write deadline (if one is set) passes.
+type stuckWriter struct {
+	header   http.Header
+	mu       sync.Mutex
+	deadline time.Time
+	writes   int
+}
+
+func (w *stuckWriter) Header() http.Header { return w.header }
+func (w *stuckWriter) WriteHeader(int)     {}
+
+func (w *stuckWriter) SetWriteDeadline(t time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadline = t
+	return nil
+}
+
+func (w *stuckWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	deadline := w.deadline
+	w.mu.Unlock()
+	if w.writes == 1 {
+		return len(b), nil // the first one fits in the socket buffers
+	}
+	if deadline.IsZero() {
+		select {} // blocks forever, as on a dead connection without a deadline
+	}
+	time.Sleep(time.Until(deadline))
+	return 0, errors.New("i/o timeout")
+}
+
+// The tuner-limit clip is sent with a write deadline: a client that
+// accepts no data does not hold the request until TCP gives up.
+func TestTunerLimitVideoDropsAStuckClient(t *testing.T) {
+	setupBufferTest(t)
+	old := tunerLimitWriteTimeout
+	tunerLimitWriteTimeout = 200 * time.Millisecond
+	defer func() { tunerLimitWriteTimeout = old }()
+
+	w := &stuckWriter{header: http.Header{}}
+	done := make(chan struct{})
+	go func() {
+		sendTunerLimitVideo(w, httptest.NewRequest(http.MethodGet, "/stream/x", nil))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("still writing to a client that accepts no data")
+	}
+}
+
+// Cost of a client connecting to a running channel and leaving again
+// (Plex probes each channel and reconnects at once). Run with -benchmem.
+func BenchmarkBufferViewerConnect(b *testing.B) {
+	setupBufferTest(b)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bufferingStream(testPlaylistID, "stream?"+b.Name(), nil, nil, nil, "bench", w, r)
+	}))
+	defer srv.Close()
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
+
+	get := func(ctx context.Context, n int64) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.CopyN(io.Discard, resp.Body, n)
+		resp.Body.Close()
+	}
+
+	// One viewer keeps the channel running.
+	ctx, cancel := context.WithCancel(context.Background())
+	running := make(chan struct{})
+	go func() {
+		defer close(running)
+		get(ctx, 1<<40)
+	}()
+	defer func() { cancel(); <-running }()
+	for streamManager.Stats().Viewers == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		get(context.Background(), 64<<10)
+	}
+}
+
+// Shutdown kills every source process (the processes run in their own
+// process groups, so they would otherwise outlive Threadfin), and no new
+// stream starts after it.
+func TestBufferShutdownKillsEveryProcess(t *testing.T) {
+	setupBufferTest(t)
+
+	m := streambuf.NewManager(streambuf.Logger{})
+	marker := "shutdown-" + t.Name()
+	request := func(i int) streambuf.Request {
+		return streambuf.Request{
+			Channel: fmt.Sprint("chan", i),
+			Program: "FFMPEG",
+			Sources: []streambuf.Source{streamSource(testPlaylistID, fmt.Sprintf("stream?%s-%d", marker, i), "primary")},
+			Launch:  bufferLauncher("ffmpeg"),
+			Config:  bufferConfig(),
+		}
+	}
+
+	var viewers []*streambuf.Viewer
+	for i := 0; i < 3; i++ {
+		v, err := m.Join(context.Background(), request(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer v.Close()
+		viewers = append(viewers, v)
+	}
+	for _, v := range viewers {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := v.WaitReady(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("stream did not start: %v", err)
+		}
+	}
+	if n := countProcesses(marker); n != 3 {
+		t.Fatalf("%d source processes running, want 3", n)
+	}
+
+	if err := m.Shutdown(5 * time.Second); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if n := countProcesses(marker); n != 0 {
+		t.Errorf("%d source processes still running after Shutdown", n)
+	}
+	if st := m.Stats(); st.Streams != 0 {
+		t.Errorf("streams after Shutdown: %+v", st)
+	}
+	if _, err := m.Join(context.Background(), request(9)); !errors.Is(err, streambuf.ErrShutdown) {
+		t.Errorf("Join after Shutdown = %v, want ErrShutdown", err)
 	}
 }

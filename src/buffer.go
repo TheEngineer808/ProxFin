@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"threadfin/src/internal/streambuf"
@@ -167,6 +168,14 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 	streamToClient(viewer, w, r)
 }
 
+// Write buffers of streamWriteSize, shared by all connections: a client
+// that connects and leaves again (Plex probes every channel) does not
+// cost a fresh 256 KB.
+var streamWriteBufs = sync.Pool{New: func() any {
+	b := make([]byte, streamWriteSize)
+	return &b
+}}
+
 func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rc := http.NewResponseController(w)
@@ -191,7 +200,9 @@ func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request)
 
 	// The pieces of each batch are combined into few large writes: each
 	// write through the HTTP connection costs several system calls.
-	wbuf := make([]byte, 0, streamWriteSize)
+	pooled := streamWriteBufs.Get().(*[]byte)
+	defer streamWriteBufs.Put(pooled)
+	wbuf := (*pooled)[:0]
 	write := func(b []byte) bool {
 		_, err := w.Write(b)
 		return err == nil
@@ -237,26 +248,90 @@ func streamToClient(v *streambuf.Viewer, w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// How long a HEAD request for a stream waits for the provider.
+var streamHeadTimeout = 10 * time.Second
+
+var streamHeadClient = &http.Client{}
+
+// streamHEAD answers a HEAD request for a stream with the headers of the
+// provider's answer to the same request. Providers that do not support
+// HEAD often never answer it, so the request is bounded by
+// streamHeadTimeout and ends when the client leaves (it used to hold the
+// connection, a goroutine and a socket to the provider forever).
+func streamHEAD(w http.ResponseWriter, r *http.Request, url string) {
+	ctx, cancel := context.WithTimeout(r.Context(), streamHeadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		ShowError(err, 1501)
+		httpStatusError(w, r, 405)
+		return
+	}
+	resp, err := streamHeadClient.Do(req)
+	if err != nil {
+		if r.Context().Err() == nil { // not just the client leaving
+			ShowError(err, 1502)
+			httpStatusError(w, r, 405)
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+}
+
+// How long one write of the "tuner limit reached" clip may take: a client
+// that accepts no data (gone without closing the connection) is dropped
+// instead of holding the request until TCP gives up, many minutes later.
+var tunerLimitWriteTimeout = 10 * time.Second
+
+var (
+	tunerLimitClipMu sync.Mutex
+	tunerLimitClip   []byte
+)
+
+// tunerLimitVideo returns the "tuner limit reached" clip, decoded once
+// (nil if it is not available).
+func tunerLimitVideo() []byte {
+	tunerLimitClipMu.Lock()
+	defer tunerLimitClipMu.Unlock()
+	if tunerLimitClip == nil {
+		if value, ok := webUI["html/video/stream-limit.ts"].(string); ok {
+			tunerLimitClip = []byte(GetHTMLString(value))
+		}
+	}
+	return tunerLimitClip
+}
+
 // sendTunerLimitVideo plays the "tuner limit reached" clip for 30 seconds.
 func sendTunerLimitVideo(w http.ResponseWriter, r *http.Request) {
-	value, ok := webUI["html/video/stream-limit.ts"]
-	if !ok {
+	content := tunerLimitVideo()
+	if content == nil {
 		http.Error(w, "All tuners are in use", http.StatusServiceUnavailable)
 		return
 	}
 
-	content := []byte(GetHTMLString(value.(string)))
 	w.Header().Set("Content-Type", "video/mpeg")
 	w.WriteHeader(http.StatusOK)
 
+	rc := http.NewResponseController(w)
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+
 	for i := 1; i < 60; i++ {
+		rc.SetWriteDeadline(time.Now().Add(tunerLimitWriteTimeout))
 		if _, err := w.Write(content); err != nil {
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-tick.C:
 		}
 	}
 }

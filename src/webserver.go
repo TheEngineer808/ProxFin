@@ -173,26 +173,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "HEAD" {
-		client := &http.Client{}
-		req, err := http.NewRequest("HEAD", streamInfo.URL, nil)
-		if err != nil {
-			ShowError(err, 1501)
-			httpStatusError(w, r, 405)
-			return
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			ShowError(err, 1502)
-			httpStatusError(w, r, 405)
-			return
-		}
-		defer resp.Body.Close()
-		// Copy headers from the source HEAD response to the outgoing response
-		for key, values := range resp.Header {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
+		streamHEAD(w, r, streamInfo.URL)
 		return
 	}
 

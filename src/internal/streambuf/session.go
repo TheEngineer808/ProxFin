@@ -31,6 +31,11 @@ var (
 	// ErrStopped means the stream was stopped (no viewers left, or its
 	// tuner was needed for another channel).
 	ErrStopped = errors.New("stream stopped")
+	// ErrShutdown is returned by Join after Shutdown.
+	ErrShutdown = errors.New("stream buffer shut down")
+	// ErrShutdownTimeout is returned by Shutdown when streams were still
+	// ending after its timeout.
+	ErrShutdownTimeout = errors.New("streams still running after the shutdown timeout")
 
 	errStartTimeout = errors.New("no data from the source")
 	errStalled      = errors.New("the source stopped sending data")
@@ -62,6 +67,14 @@ type Config struct {
 	HealthyAfter time.Duration
 	RetryBackoff time.Duration
 
+	// A channel without backups whose source drops after it streamed
+	// healthily gets this many more attempts before its viewers are
+	// released, with the pause growing by RetryBackoff each time (an
+	// upstream that is unreachable for a few seconds does not end the
+	// channel). A channel that never started still fails at once, and
+	// channels with backups switch to them as before.
+	LoneSourceRetries int
+
 	// How long the stream keeps running after its last viewer leaves.
 	// Clients such as Plex probe a stream and reconnect right away; the
 	// second request then reuses the running stream instead of tuning
@@ -86,19 +99,20 @@ type Config struct {
 // DefaultConfig returns the recommended settings.
 func DefaultConfig() Config {
 	return Config{
-		Prebuffer:        1 << 20,
-		PrebufferMaxWait: 3 * time.Second,
-		Retention:        15 * time.Second,
-		MaxBufferBytes:   48 << 20,
-		StartTimeout:     20 * time.Second,
-		StallTimeout:     15 * time.Second,
-		HealthyAfter:     10 * time.Second,
-		RetryBackoff:     500 * time.Millisecond,
-		Linger:           5 * time.Second,
-		TunerWait:        2 * time.Second,
-		ReadSize:         64 << 10,
-		CoalesceBytes:    64 << 10,
-		CoalesceDelay:    100 * time.Millisecond,
+		Prebuffer:         1 << 20,
+		PrebufferMaxWait:  3 * time.Second,
+		Retention:         15 * time.Second,
+		MaxBufferBytes:    48 << 20,
+		StartTimeout:      20 * time.Second,
+		StallTimeout:      15 * time.Second,
+		HealthyAfter:      10 * time.Second,
+		RetryBackoff:      500 * time.Millisecond,
+		LoneSourceRetries: 3, // pauses of 0.5, 1, 1.5 and 2 s
+		Linger:            5 * time.Second,
+		TunerWait:         2 * time.Second,
+		ReadSize:          64 << 10,
+		CoalesceBytes:     64 << 10,
+		CoalesceDelay:     100 * time.Millisecond,
 	}
 }
 
@@ -165,23 +179,32 @@ func (l Logger) error(err error) {
 }
 
 // Manager owns every running stream and the tuner counts. All bookkeeping
-// happens under its single mutex; the data path does not touch it.
+// happens under its single mutex; the data path does not touch it. Nothing
+// is logged while it is held: a log write that blocks (a stalled stdout)
+// must not stop every tune and the web interface's counts with it.
 type Manager struct {
 	log Logger
 
 	mu       sync.Mutex
 	sessions map[string]*session
 	tuners   map[string]int // playlist ID -> tuners in use
-	freed    chan struct{}  // closed and replaced when a tuner is released
+
+	// Closed and replaced when a tuner may have become available: one was
+	// released, or a stream lost its last viewer (a lingering stream gives
+	// its tuner to a new channel). Joins waiting for a tuner look again.
+	tunerChange chan struct{}
+
+	shutdown bool
+	running  sync.WaitGroup // session goroutines, each until its process has exited
 }
 
 // NewManager creates an empty manager.
 func NewManager(log Logger) *Manager {
 	return &Manager{
-		log:      log,
-		sessions: map[string]*session{},
-		tuners:   map[string]int{},
-		freed:    make(chan struct{}),
+		log:         log,
+		sessions:    map[string]*session{},
+		tuners:      map[string]int{},
+		tunerChange: make(chan struct{}),
 	}
 }
 
@@ -225,6 +248,11 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 
 	m.mu.Lock()
 	for {
+		if m.shutdown {
+			m.mu.Unlock()
+			return nil, ErrShutdown
+		}
+
 		if s := m.sessions[key]; s != nil {
 			v := s.addViewerLocked()
 			n := s.viewers
@@ -233,21 +261,28 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 			return v, nil
 		}
 
-		if m.tuners[primary.PlaylistID] < primary.TunerLimit || m.evictLingeringLocked(primary.PlaylistID) {
+		free := m.tuners[primary.PlaylistID] < primary.TunerLimit
+		var evicted *session
+		if !free {
+			evicted = m.evictLingeringLocked(primary.PlaylistID)
+		}
+		if free || evicted != nil {
 			s := newSession(m, key, req)
 			m.sessions[key] = s
 			m.tuners[primary.PlaylistID]++
 			s.tunerPlaylist = primary.PlaylistID
 			used := m.tuners[primary.PlaylistID]
 			v := s.addViewerLocked()
+			m.running.Add(1)
 			m.mu.Unlock()
 
+			m.logEvicted(evicted)
 			m.log.info("Streaming Status:Playlist: %s - Tuner: %d / %d", primary.PlaylistName, used, primary.TunerLimit)
 			go s.run()
 			return v, nil
 		}
 
-		freed := m.freed
+		changed := m.tunerChange
 		m.mu.Unlock()
 
 		remaining := time.Until(deadline)
@@ -256,7 +291,7 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 		}
 		timer := time.NewTimer(remaining)
 		select {
-		case <-freed:
+		case <-changed:
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
@@ -267,17 +302,54 @@ func (m *Manager) Join(ctx context.Context, req Request) (*Viewer, error) {
 	}
 }
 
+// Shutdown stops every stream, killing each source's process (and the
+// processes it started), and waits up to timeout for them to exit; it
+// returns ErrShutdownTimeout if some were still running then. Viewers get
+// ErrStopped, and Joins after Shutdown (including those waiting for a
+// tuner) fail with ErrShutdown. Call it before Threadfin exits: the
+// processes run in their own process groups, so they would otherwise
+// outlive it and keep holding the providers' connections.
+func (m *Manager) Shutdown(timeout time.Duration) error {
+	m.mu.Lock()
+	m.shutdown = true
+	for _, s := range m.sessions {
+		m.stopLocked(s)
+	}
+	m.tunerChangedLocked() // wakes the Joins waiting for a tuner
+	m.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.running.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-t.C:
+		return ErrShutdownTimeout
+	}
+}
+
 // evictLingeringLocked stops a stream of the playlist that has no viewers,
-// freeing its tuner. It reports whether one was found.
-func (m *Manager) evictLingeringLocked(playlistID string) bool {
+// freeing its tuner. It returns that stream, or nil if there is none; the
+// caller logs it with logEvicted once the lock is released.
+func (m *Manager) evictLingeringLocked(playlistID string) *session {
 	for _, s := range m.sessions {
 		if s.tunerPlaylist == playlistID && s.viewers == 0 {
-			m.log.debug("Streaming Status:Channel: %s - giving its tuner to a new channel", s.req.Channel)
 			m.stopLocked(s)
-			return true
+			return s
 		}
 	}
-	return false
+	return nil
+}
+
+func (m *Manager) logEvicted(s *session) {
+	if s != nil {
+		m.log.debug("Streaming Status:Channel: %s - giving its tuner to a new channel", s.req.Channel)
+	}
 }
 
 // stopLocked marks the session as ended: it leaves the map (new viewers of
@@ -305,38 +377,55 @@ func (m *Manager) releaseTunerLocked(s *session) {
 		delete(m.tuners, s.tunerPlaylist)
 	}
 	s.tunerPlaylist = ""
-	close(m.freed)
-	m.freed = make(chan struct{})
+	m.tunerChangedLocked()
+}
+
+// tunerChangedLocked wakes the joins waiting for a tuner.
+func (m *Manager) tunerChangedLocked() {
+	close(m.tunerChange)
+	m.tunerChange = make(chan struct{})
 }
 
 // moveTuner makes the session hold a tuner of the source's playlist,
 // giving back the one it holds now. It reports false if none is free.
 func (m *Manager) moveTuner(s *session, src Source) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	ok, evicted := m.moveTunerLocked(s, src)
+	m.mu.Unlock()
 
+	m.logEvicted(evicted)
+	return ok
+}
+
+func (m *Manager) moveTunerLocked(s *session, src Source) (ok bool, evicted *session) {
 	if s.closing {
-		return false
+		return false, nil
 	}
 	if s.tunerPlaylist == src.PlaylistID {
-		return true
+		return true, nil
 	}
-	if m.tuners[src.PlaylistID] >= src.TunerLimit && !m.evictLingeringLocked(src.PlaylistID) {
-		return false
+	if m.tuners[src.PlaylistID] >= src.TunerLimit {
+		if evicted = m.evictLingeringLocked(src.PlaylistID); evicted == nil {
+			return false, nil
+		}
 	}
 	m.releaseTunerLocked(s)
 	m.tuners[src.PlaylistID]++
 	s.tunerPlaylist = src.PlaylistID
-	return true
+	return true, evicted
 }
 
 func (m *Manager) viewerLeft(s *session) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	s.viewers--
-	m.log.info("Streaming Status:Channel: %s (Clients: %d)", s.req.Channel, s.viewers)
+	n := s.viewers
+	m.viewerLeftLocked(s)
+	m.mu.Unlock()
 
+	m.log.info("Streaming Status:Channel: %s (Clients: %d)", s.req.Channel, n)
+}
+
+func (m *Manager) viewerLeftLocked(s *session) {
 	if s.viewers > 0 || s.closing {
 		return
 	}
@@ -346,6 +435,13 @@ func (m *Manager) viewerLeft(s *session) {
 		m.stopLocked(s)
 		return
 	}
+
+	// The stream now lingers, and a new channel may take its tuner. A
+	// client that opened the new channel before closing this one is
+	// waiting for exactly that: let it look again now rather than at the
+	// end of its TunerWait.
+	m.tunerChangedLocked()
+
 	s.lingerTimer = time.AfterFunc(linger, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -385,7 +481,7 @@ func newSession(m *Manager, key string, req Request) *session {
 		m:      m,
 		key:    key,
 		req:    req,
-		ring:   newRing(maxBytes, cfg.Retention),
+		ring:   newRing(maxBytes, cfg.Retention, cfg.CoalesceBytes),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -402,6 +498,8 @@ func (s *session) addViewerLocked() *Viewer {
 
 // run supervises the stream until it is stopped or every source failed.
 func (s *session) run() {
+	defer s.m.running.Done() // last: after the process has exited
+
 	var finalErr = ErrStopped
 	defer func() {
 		s.m.mu.Lock()
@@ -444,6 +542,12 @@ func (s *session) run() {
 		if streamed >= cfg.HealthyAfter {
 			// It worked for a while: most likely a hiccup. Reconnect at once.
 			failures = 0
+			if len(sources) == 1 {
+				// Nothing to fail over to: if the upstream is gone for a
+				// moment, viewers are better served by a few more attempts
+				// than by being dropped after the second one.
+				maxFailures = 2 + cfg.LoneSourceRetries
+			}
 			s.m.log.info("Streaming Status:Channel: %s - %s dropped after %v (%v), reconnecting", s.req.Channel, src.Label, streamed.Round(time.Second), err)
 			continue
 		}
@@ -588,8 +692,8 @@ func (s *session) attempt(src Source) (streamed time.Duration, err error) {
 // makeChunk copies output from the packetizer into a pooled chunk (held by
 // the ring once appended) and finds its first join point.
 func makeChunk(out []byte, mode packetizerMode, ins *inspector, at time.Time) *chunk {
-	data, class := newChunkData(out)
-	c := &chunk{data: data, class: class, at: at, join: -1}
+	data, buf, class := newChunkData(out)
+	c := &chunk{data: data, buf: buf, class: class, at: at, join: -1}
 	c.refs.n.Store(1)
 
 	if mode != modeTS {
@@ -740,7 +844,7 @@ func (v *Viewer) Next(ctx context.Context) ([][]byte, error) {
 	var oldest time.Time
 
 	for {
-		chunks, wait, res, err := v.s.ring.read(&v.seq, maxBatch-len(out), v.scratch[:0])
+		chunks, wait, res, err := v.s.ring.read(&v.seq, maxBatch-len(out), v.scratch[:0], len(out) > 0)
 		v.scratch = chunks[:0]
 
 		if len(chunks) > 0 {
@@ -818,8 +922,9 @@ func (v *Viewer) Next(ctx context.Context) ([][]byte, error) {
 			select {
 			case <-wait:
 			case <-v.after(d):
-				v.out = out
-				return out, nil
+				// Due: take what arrived while waiting (only a full
+				// batch wakes this wait early), then return.
+				continue
 			case <-ctx.Done():
 				v.out = out
 				return out, ctx.Err()

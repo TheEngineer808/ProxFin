@@ -40,34 +40,35 @@ func classOf(n int) int {
 	return -1
 }
 
-// newChunkData returns a pooled copy of data, and its size class (-1 if it
-// is too large to pool).
-func newChunkData(data []byte) ([]byte, int) {
+// newChunkData returns a pooled copy of data, the pool buffer that holds
+// it and the buffer's size class (nil and -1 if data is too large to
+// pool). The buffer goes back to the pool with releaseChunkData; keeping
+// the pointer the pool handed out means putting it back allocates nothing.
+func newChunkData(data []byte) ([]byte, *[]byte, int) {
 	class := classOf(len(data))
 	if class < 0 {
-		return append([]byte(nil), data...), -1
+		return append([]byte(nil), data...), nil, -1
 	}
-	var buf []byte
-	if p, ok := pools[class].Get().(*[]byte); ok {
-		buf = (*p)[:len(data)]
-	} else {
-		buf = make([]byte, len(data), classSizes[class])
+	buf, _ := pools[class].Get().(*[]byte)
+	if buf == nil {
+		b := make([]byte, classSizes[class])
+		buf = &b
 	}
-	copy(buf, data)
-	return buf, class
+	out := (*buf)[:len(data)]
+	copy(out, data)
+	return out, buf, class
 }
 
-func releaseChunkData(buf []byte, class int) {
-	if class < 0 {
+func releaseChunkData(buf *[]byte, class int) {
+	if buf == nil {
 		return
 	}
-	buf = buf[:cap(buf)]
 	if poisonReleased {
-		for i := range buf {
-			buf[i] = 0xEE
+		for i := range *buf {
+			(*buf)[i] = 0xEE
 		}
 	}
-	pools[class].Put(&buf)
+	pools[class].Put(buf)
 }
 
 // refs counts the holders of a chunk: the ring while the chunk is in it,
@@ -81,8 +82,8 @@ func (c *chunk) retain() { c.refs.n.Add(1) }
 func (c *chunk) release() {
 	switch n := c.refs.n.Add(-1); {
 	case n == 0:
-		releaseChunkData(c.data, c.class)
-		c.data = nil
+		releaseChunkData(c.buf, c.class)
+		c.data, c.buf = nil, nil
 	case n < 0:
 		panic("streambuf: chunk released more often than retained")
 	}
